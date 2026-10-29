@@ -1,0 +1,6 @@
+# v2 base: long.yaml + image augmentation (train only, on the GPU; see train.py::augment_images).
+# Why: in the v1 runs the validation error stops improving after ~1-2k epochs while the training
+# error keeps falling (39-49 demos, 2 cameras) -> make the images less memorisable.
+_base_: ../long.yaml
+train:
+  augment: {shift: 0.04, brightness: 0.2, contrast: 0.2, saturation: 0.2}

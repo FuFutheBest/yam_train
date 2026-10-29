@@ -46,9 +46,37 @@ def compute_dict_mean(epoch_dicts: list[dict]) -> dict:  # utils.py::compute_dic
     return {k: sum(d[k] for d in epoch_dicts) / len(epoch_dicts) for k in epoch_dicts[0]}
 
 
-def forward_pass(data, policy, device):
+def augment_images(img: torch.Tensor, aug: dict) -> torch.Tensor:
+    """v2 option (train.augment; null = source, no augmentation).  img (B, K, 3, H, W) in 0..1 on the GPU.
+    Per image: random shift up to `shift` x size (edge-replicate pad, crop back; scale unchanged, so the
+    robot's full frame stays in-distribution) + brightness/contrast/saturation jitter (x U[1-v, 1+v])."""
+    b, k, c, h, w = img.shape
+    x = img.reshape(b * k, c, h, w)
+    n = x.shape[0]
+    dev = x.device
+    if aug.get("shift", 0) > 0:
+        ph, pw = int(round(aug["shift"] * h)), int(round(aug["shift"] * w))
+        padded = torch.nn.functional.pad(x, (pw, pw, ph, ph), mode="replicate")
+        oy = torch.randint(0, 2 * ph + 1, (n,)).tolist()
+        ox = torch.randint(0, 2 * pw + 1, (n,)).tolist()
+        x = torch.stack([padded[i, :, oy[i]:oy[i] + h, ox[i]:ox[i] + w] for i in range(n)])
+
+    def factor(v: float) -> torch.Tensor:
+        return (1 + (torch.rand(n, 1, 1, 1, device=dev) * 2 - 1) * v) if v > 0 else torch.ones(1, device=dev)
+
+    x = x * factor(aug.get("brightness", 0))
+    mean = x.mean(dim=(1, 2, 3), keepdim=True)
+    x = (x - mean) * factor(aug.get("contrast", 0)) + mean
+    gray = (0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3])
+    x = (x - gray) * factor(aug.get("saturation", 0)) + gray
+    return x.clamp(0, 1).reshape(b, k, c, h, w)
+
+
+def forward_pass(data, policy, device, aug: dict | None = None):
     image_data, qpos_data, action_data, is_pad = data
     image_data = image_data.to(device, non_blocking=True).float() / 255.0  # source: image_data / 255.0
+    if aug:
+        image_data = augment_images(image_data, aug)
     return policy(qpos_data.to(device), image_data, action_data.to(device), is_pad.to(device))
 
 
@@ -178,7 +206,7 @@ def main() -> None:
         "action_shift": d["action_shift"],
         "action_mode": d["action_mode"],
     }
-    train_ds = EpisodicDataset(store, train_eps, **ds_kw)
+    train_ds = EpisodicDataset(store, train_eps, **ds_kw, qpos_noise=float(d.get("qpos_noise", 0.0)))
     val_ds = EpisodicDataset(store, val_eps, **ds_kw)
     nw = int(tc.get("num_workers", 1))
     dl_kw = {"batch_size": tc["batch_size"], "shuffle": True, "pin_memory": True, "num_workers": nw}
@@ -248,7 +276,7 @@ def main() -> None:
         optimizer.zero_grad()
         train_dicts = []
         for data in train_loader:
-            forward_dict = forward_pass(data, policy, device)
+            forward_dict = forward_pass(data, policy, device, tc.get("augment"))
             loss = forward_dict["loss"]
             loss.backward()
             optimizer.step()

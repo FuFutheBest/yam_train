@@ -1,0 +1,4 @@
+# v1 blue_cup_delta + image augmentation + qpos input noise 0.03 rad (delta targets follow the noisy
+# state): against the closed-loop drift of delta (each plan is anchored on the arm's own state)
+_base_: aug.yaml
+data: {task: put_blue_block_in_blue_cup, action_mode: delta, qpos_noise: 0.03}

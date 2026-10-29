@@ -1,0 +1,5 @@
+# v1 blue_cup_abs + image augmentation + chunk 60 (= 2 s at 30 Hz, the paper's 100 steps at 50 Hz;
+# v1 chunk 100 = 3.3 s commits to old plans longer)
+_base_: aug.yaml
+data: {task: put_blue_block_in_blue_cup, action_mode: abs}
+policy: {chunk_size: 60}

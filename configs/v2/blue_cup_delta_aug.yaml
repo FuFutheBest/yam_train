@@ -1,0 +1,3 @@
+# v1 blue_cup_delta + image augmentation
+_base_: aug.yaml
+data: {task: put_blue_block_in_blue_cup, action_mode: delta}

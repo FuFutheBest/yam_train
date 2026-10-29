@@ -21,6 +21,9 @@ data:
   #   delta : leader(t - action_shift + k) - follower(t)
   #           (relative to the chunk's first observed follower state)
   action_mode: abs
+  # v2 (not in the source; 0 = off): train-only noise [rad] on the arm joints of the qpos input,
+  # delta targets follow the noisy state (see dataset.py)
+  qpos_noise: 0.0
 
 # names as in the source; values from imitate_episodes.py / README / Table III
 policy:
@@ -52,3 +55,6 @@ train:
   extra_eval_every: 100
   extra_eval_samples: 256
   device: cuda
+  # v2 (not in the source; null = off): train-only image augmentation on the GPU, e.g.
+  #   {shift: 0.04, brightness: 0.2, contrast: 0.2, saturation: 0.2}   (see train.py::augment_images)
+  augment: null

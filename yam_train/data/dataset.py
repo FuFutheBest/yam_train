@@ -120,7 +120,7 @@ def norm_stats(store: FrameStore, eps: list[dict], chunk: int, shift: int, mode:
 
 class EpisodicDataset(Dataset):
     def __init__(self, store: FrameStore, episodes: list[dict], camera_names: list[str], norm_stats: dict,
-                 chunk_size: int, action_shift: int, action_mode: str):
+                 chunk_size: int, action_shift: int, action_mode: str, qpos_noise: float = 0.0):
         self.store = store
         self.episodes = episodes
         self.camera_names = list(camera_names)
@@ -128,6 +128,10 @@ class EpisodicDataset(Dataset):
         self.chunk_size = chunk_size
         self.action_shift = action_shift
         self.action_mode = action_mode
+        # v2 option (0 = source): training-only Gaussian noise [rad] on the 12 arm joints of the qpos INPUT;
+        # delta targets are taken relative to the noisy state, so the absolute target stays the human's
+        # (DART-like: teaches "my state estimate is off -> still go to the right place").
+        self.qpos_noise = float(qpos_noise)
 
     def __len__(self) -> int:
         return len(self.episodes)
@@ -135,17 +139,24 @@ class EpisodicDataset(Dataset):
     def __getitem__(self, index):
         ep = self.episodes[index]
         start_ts = np.random.choice(ep["length"])
-        return self.sample(ep, int(start_ts))
+        return self.sample(ep, int(start_ts), self.qpos_noise)
 
-    def sample(self, ep: dict, start_ts: int):
+    def sample(self, ep: dict, start_ts: int, qpos_noise: float = 0.0):
         """(image uint8 (k, 3, H, W), qpos (14,), action (chunk, 14), is_pad (chunk,)), normalised like the source.
         Images stay uint8 here; train.py divides by 255 on the GPU (same numbers, 4x less IPC)."""
         s, n = ep["start"], ep["length"]
         q, a = self.store.qpos[s:s + n], self.store.action[s:s + n]
         action, is_pad = chunk_targets(q, a, start_ts, self.chunk_size, self.action_shift, self.action_mode)
+        q_obs = q[start_ts]
+        if qpos_noise > 0:
+            eps = np.zeros(q_obs.shape, np.float32)
+            eps[np.r_[0:6, 7:13]] = np.random.normal(0.0, qpos_noise, 12)
+            q_obs = q_obs + eps
+            if self.action_mode == "delta":  # target relative to the (noisy) observed state
+                action[~is_pad] -= eps
         images = np.stack([self.store.image(c, s + start_ts) for c in self.camera_names])
         st = self.norm_stats
         image_data = torch.einsum("k h w c -> k c h w", torch.from_numpy(images))
-        qpos_data = torch.from_numpy((q[start_ts] - st["qpos_mean"]) / st["qpos_std"]).float()
+        qpos_data = torch.from_numpy((q_obs - st["qpos_mean"]) / st["qpos_std"]).float()
         action_data = torch.from_numpy((action - st["action_mean"]) / st["action_std"]).float()
         return image_data, qpos_data, action_data, torch.from_numpy(is_pad)
