@@ -1,0 +1,6 @@
+.venv/
+tmp/
+__pycache__/
+.ruff_cache/
+runs/
+models/*.pt
