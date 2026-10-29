@@ -32,17 +32,17 @@ yam_train/
 │   ├── train.py       DDP 训练（metrics.jsonl / curves.png / tb / ckpt）
 │   └── tools/         eval_offline.py 验证集开环评估、export.py 导出交付模型
 ├── scripts/setup_venv.sh  建 .venv（默认 torch 2.7.1+cu126，阿里云镜像；`cpu` 参数给无 GPU 机器）
-└── docs/              01 数据 / 02 模型 / 03 训练 / 05 报告
+└── docs/              01 数据 / 02 模型 / 03 训练 / 05 报告 / 06 与 ACT 原版对比
 ```
 
 - 不放推理代码（在 `../yam_infer`）。
-- 本机 `.venv` 目前是指向 `../opus_inference_train/.venv` 的软链接；`setup_venv.sh` 遇到软链接会拒绝，需先 `rm .venv`。
+- 本机 `.venv` 由 `bash scripts/setup_venv.sh cpu` 建立（torch CPU，只做静态检查/小测试）。`../opus_inference_train` 已弃用。
 
 ## 已交付模型的来源（`../yam_infer/models/`）
 
-| 模型 | 训练参数（`torchrun --nproc_per_node 4 -m yam_train.train --data DATA ...`） | 说明 |
-|---|---|---|
-| `act_v2_all.pt` | `--out runs/act_v2_all --steps 15000 --action-mode delta --train-split all` | 全部 81 条，step 15000 |
-| `act_v2_delta_s15k.pt` | `--out runs/act_v2_delta --steps 30000 --action-mode delta` | 留 8 条验证，取 step 15000 |
+| 模型                   | 训练参数（`torchrun --nproc_per_node 4 -m yam_train.train --data DATA ...`） | 说明                       |
+| ---------------------- | ---------------------------------------------------------------------------- | -------------------------- |
+| `act_v2_all.pt`        | `--out runs/act_v2_all --steps 15000 --action-mode delta --train-split all`  | 全部 81 条，step 15000     |
+| `act_v2_delta_s15k.pt` | `--out runs/act_v2_delta --steps 30000 --action-mode delta`                  | 留 8 条验证，取 step 15000 |
 
 当时用 `opus` 包名训练；checkpoint 里只有张量和 dict，不依赖包名，可直接用本仓库加载。

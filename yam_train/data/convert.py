@@ -63,7 +63,9 @@ def convert_episode(args: tuple[str, int, int, int]) -> dict:
         for i, j in enumerate(nearest):
             if j not in cache:
                 rgb = decode_jpeg_rgb(frames[j])
-                cache = {j: cv2.resize(rgb, (width, height), interpolation=cv2.INTER_AREA)}
+                cache = {
+                    j: cv2.resize(rgb, (width, height), interpolation=cv2.INTER_AREA)
+                }
             images[i, ci] = cache[j]
     return {
         "path": path,
@@ -87,7 +89,9 @@ def compute_stats(x: np.ndarray) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--raw", required=True, type=Path, help="dir containing <task>/episode_xxxx")
+    parser.add_argument(
+        "--raw", required=True, type=Path, help="dir containing <task>/episode_xxxx"
+    )
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--height", type=int, default=240)
@@ -96,7 +100,9 @@ def main() -> None:
     args = parser.parse_args()
 
     episodes = sorted(
-        p for p in args.raw.glob("*/episode_*") if p.is_dir() and not p.name.endswith("_inprogress")
+        p
+        for p in args.raw.glob("*/episode_*")
+        if p.is_dir() and not p.name.endswith("_inprogress")
     )
     tasks = sorted({p.parent.name for p in episodes})
     print(f"{len(episodes)} episodes, tasks={tasks}")
@@ -106,13 +112,17 @@ def main() -> None:
     results = []
     with ProcessPoolExecutor(args.workers) as pool:
         for r in pool.map(convert_episode, jobs):
-            print(f"  {Path(r['path']).parent.name}/{Path(r['path']).name}: {len(r['qpos'])} steps,"
-                  f" max cam gap {r['max_cam_gap_ms']:.1f} ms")
+            print(
+                f"  {Path(r['path']).parent.name}/{Path(r['path']).name}: {len(r['qpos'])} steps,"
+                f" max cam gap {r['max_cam_gap_ms']:.1f} ms"
+            )
             results.append(r)
 
     total = sum(len(r["qpos"]) for r in results)
     images = np.lib.format.open_memmap(
-        args.out / "images.npy", mode="w+", dtype=np.uint8,
+        args.out / "images.npy",
+        mode="w+",
+        dtype=np.uint8,
         shape=(total, len(CAM_ORDER), args.height, args.width, 3),
     )
     qpos = np.empty((total, 14), np.float32)
@@ -123,32 +133,41 @@ def main() -> None:
     for r in results:
         task = Path(r["path"]).parent.name
         n = len(r["qpos"])
-        images[cursor:cursor + n] = r["images"]
-        qpos[cursor:cursor + n] = r["qpos"]
-        action[cursor:cursor + n] = r["action"]
+        images[cursor : cursor + n] = r["images"]
+        qpos[cursor : cursor + n] = r["qpos"]
+        action[cursor : cursor + n] = r["action"]
         split = "val" if counters[task] % VAL_EVERY == VAL_EVERY - 1 else "train"
         counters[task] += 1
         start_idx = cursor
-        meta_eps.append({
-            "name": f"{task}/{Path(r['path']).name}",
-            "task": task,
-            "task_id": tasks.index(task),
-            "task_description": r["task_description"],
-            "start": start_idx,
-            "length": n,
-            "split": split,
-            "start_qpos": r["qpos"][0].tolist(),
-        })
+        meta_eps.append(
+            {
+                "name": f"{task}/{Path(r['path']).name}",
+                "task": task,
+                "task_id": tasks.index(task),
+                "task_description": r["task_description"],
+                "start": start_idx,
+                "length": n,
+                "split": split,
+                "start_qpos": r["qpos"][0].tolist(),
+            }
+        )
         cursor += n
     images.flush()
     np.save(args.out / "qpos.npy", qpos)
     np.save(args.out / "action.npy", action)
 
-    train_rows = np.concatenate([
-        np.arange(e["start"], e["start"] + e["length"]) for e in meta_eps if e["split"] == "train"
-    ])
+    train_rows = np.concatenate(
+        [
+            np.arange(e["start"], e["start"] + e["length"])
+            for e in meta_eps
+            if e["split"] == "train"
+        ]
+    )
     start_pose = {
-        t: np.mean([e["start_qpos"] for e in meta_eps if e["task"] == t], axis=0).tolist() for t in tasks
+        t: np.mean(
+            [e["start_qpos"] for e in meta_eps if e["task"] == t], axis=0
+        ).tolist()
+        for t in tasks
     }
     meta = {
         "fps": args.fps,
@@ -157,7 +176,10 @@ def main() -> None:
         "tasks": tasks,
         "state_layout": "left_joint0..5,left_gripper,right_joint0..5,right_gripper",
         "total_steps": total,
-        "stats": {"qpos": compute_stats(qpos[train_rows]), "action": compute_stats(action[train_rows])},
+        "stats": {
+            "qpos": compute_stats(qpos[train_rows]),
+            "action": compute_stats(action[train_rows]),
+        },
         "start_pose": start_pose,
         "episodes": meta_eps,
     }

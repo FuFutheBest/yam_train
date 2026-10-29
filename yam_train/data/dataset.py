@@ -20,31 +20,49 @@ class ChunkDataset(Dataset):
     task    int
     """
 
-    def __init__(self, root: str | Path, split: str, chunk_size: int, episodes: list[str] | None = None,
-                 action_mode: str = "abs", action_stats: dict | None = None):
+    def __init__(
+        self,
+        root: str | Path,
+        split: str,
+        chunk_size: int,
+        episodes: list[str] | None = None,
+        action_mode: str = "abs",
+        action_stats: dict | None = None,
+    ):
         self.root = Path(root)
         try:
             self.meta = json.loads((self.root / "meta.json").read_text())
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"cannot read dataset meta in {self.root}: {exc}") from exc
+            raise RuntimeError(
+                f"cannot read dataset meta in {self.root}: {exc}"
+            ) from exc
         self.chunk = chunk_size
         self.images = np.load(self.root / "images.npy", mmap_mode="r")
         self.qpos = np.load(self.root / "qpos.npy")
         self.action = np.load(self.root / "action.npy")
         st = self.meta["stats"]
-        self.q_mean, self.q_std = np.array(st["qpos"]["mean"], np.float32), np.array(st["qpos"]["std"], np.float32)
+        self.q_mean, self.q_std = np.array(st["qpos"]["mean"], np.float32), np.array(
+            st["qpos"]["std"], np.float32
+        )
         self.action_mode = action_mode
         if action_mode == "delta":
             # actions are expressed relative to the current follower state: a(t+k) - qpos(t)
-            st = {"action": action_stats or delta_stats(self.meta, self.qpos, self.action, chunk_size)}
+            st = {
+                "action": action_stats
+                or delta_stats(self.meta, self.qpos, self.action, chunk_size)
+            }
         elif action_mode != "abs":
             raise ValueError(f"unknown action_mode {action_mode}")
         self.action_stats = st["action"]
-        self.a_mean, self.a_std = np.array(st["action"]["mean"], np.float32), np.array(st["action"]["std"], np.float32)
+        self.a_mean, self.a_std = np.array(st["action"]["mean"], np.float32), np.array(
+            st["action"]["std"], np.float32
+        )
 
         self.eps = [
-            e for e in self.meta["episodes"]
-            if (split == "all" or e["split"] == split) and (episodes is None or e["name"] in episodes)
+            e
+            for e in self.meta["episodes"]
+            if (split == "all" or e["split"] == split)
+            and (episodes is None or e["name"] in episodes)
         ]
         rows, ep_end, task = [], [], []
         for e in self.eps:
@@ -63,7 +81,11 @@ class ChunkDataset(Dataset):
         r, end = int(self.rows[i]), int(self.ep_end[i])
         idx = np.minimum(np.arange(r, r + self.chunk), end - 1)
         is_pad = np.arange(r, r + self.chunk) >= end
-        act = self.action[idx] - self.qpos[r] if self.action_mode == "delta" else self.action[idx]
+        act = (
+            self.action[idx] - self.qpos[r]
+            if self.action_mode == "delta"
+            else self.action[idx]
+        )
         return {
             "images": torch.from_numpy(np.ascontiguousarray(self.images[r])),
             "qpos": torch.from_numpy((self.qpos[r] - self.q_mean) / self.q_std),
@@ -80,10 +102,14 @@ def delta_stats(meta: dict, qpos: np.ndarray, action: np.ndarray, chunk: int) ->
         if e["split"] != "train":
             continue
         s, n = e["start"], e["length"]
-        q, a = qpos[s:s + n], action[s:s + n]
+        q, a = qpos[s : s + n], action[s : s + n]
         for k in range(0, chunk, 5):
             idx = np.minimum(np.arange(n) + k, n - 1)
             deltas.append(a[idx] - q)
     d = np.concatenate(deltas)
-    return {"mean": d.mean(0).tolist(), "std": np.maximum(d.std(0), 1e-2).tolist(),
-            "min": d.min(0).tolist(), "max": d.max(0).tolist()}
+    return {
+        "mean": d.mean(0).tolist(),
+        "std": np.maximum(d.std(0), 1e-2).tolist(),
+        "min": d.min(0).tolist(),
+        "max": d.max(0).tolist(),
+    }
