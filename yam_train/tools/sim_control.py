@@ -13,7 +13,8 @@ What is simulated (same objects / numbers as yam_infer/run.py):
                      (margin 0.15 rad, 1.5 rad/s); --freeze-left = run.yaml control.freeze_left
     qpos input     : recorded  = the recorded follower state (open loop, isolates the network + executor)
                      sim       = a simulated follower driven by OUR commands (first-order lag 0.13 s +
-                                 33 ms delay, fitted on the recordings: 0.0155 rad residual), so the
+                                 33 ms delay + constant per-joint sag, fitted on the recordings:
+                                 0.013 rad residual on the right arm), so the
                                  network sees the consequences of its own actions in the joint input.
                                  Images stay recorded -> only the proprioceptive half of the loop.
 Compared with the human command leader(t - action_shift) at 100 Hz (right arm = the working arm):
@@ -42,10 +43,13 @@ LEFT = np.r_[0:7]
 
 
 class SimFollower:
-    """Follower joints: first-order lag tau toward the command, command delayed by `delay` s."""
+    """Follower joints: first-order lag tau toward the command, command delayed by `delay` s, plus the
+    constant per-joint offset of the real arm (gravity sag, e.g. wrist joint3 -0.03..-0.06 rad; grippers 0).
+    Without the offset a delta model would be re-anchored on a state the real arm never has and drift."""
 
-    def __init__(self, state: np.ndarray, tau: float = 0.13, delay: float = 1 / 30):
-        self.x = np.asarray(state, np.float64).copy()
+    def __init__(self, state: np.ndarray, offset: np.ndarray, tau: float = 0.13, delay: float = 1 / 30):
+        self.offset = np.asarray(offset, np.float64)
+        self.x = np.asarray(state, np.float64) - self.offset  # internal = without the sag
         self.tau, self.delay = tau, delay
         self.cmds: list[tuple[float, np.ndarray]] = []
 
@@ -60,7 +64,31 @@ class SimFollower:
                 break
         if tgt is not None:
             self.x += (tgt - self.x) * (1 - np.exp(-dt / self.tau))
-        return self.x.copy()
+        return self.x + self.offset
+
+
+def lag_filter(leader: np.ndarray, fps: float, tau: float = 0.13, delay_frames: int = 1, sub: int = 10) -> np.ndarray:
+    """The SimFollower response (without offset) to a recorded leader trajectory."""
+    out = np.empty_like(leader)
+    x = leader[0].copy()
+    lead = np.concatenate([np.repeat(leader[:1], delay_frames, 0), leader])[: len(leader)]
+    a = 1 - np.exp(-1 / fps / sub / tau)
+    for i in range(len(leader)):
+        for _ in range(sub):
+            x += (lead[i] - x) * a
+        out[i] = x
+    return out
+
+
+def follower_offset(store: FrameStore, eps: list[dict], fps: float) -> np.ndarray:
+    """mean(recorded follower - lag(leader)) per joint over the task's episodes; grippers 0."""
+    diffs = []
+    for e in eps:
+        s, n = e["start"], e["length"]
+        diffs.append(store.qpos[s:s + n] - lag_filter(store.action[s:s + n].astype(np.float64), fps))
+    off = np.concatenate(diffs).mean(0)
+    off[[6, 13]] = 0.0
+    return off
 
 
 def interp_rows(values: np.ndarray, fps: float, t: np.ndarray) -> np.ndarray:
@@ -83,14 +111,14 @@ def batched_chunks(policy, images: np.ndarray, qpos: np.ndarray, batch: int = 32
 
 
 def simulate(policy, sched_cls, safety_cls, images: np.ndarray, qpos_rec: np.ndarray, fps: float, args,
-             pre: np.ndarray | None) -> dict:
+             pre: np.ndarray | None, offset: np.ndarray) -> dict:
     """One episode through the control stack. `pre` = precomputed chunks (recorded-qpos mode)."""
     n = len(qpos_rec)
     sched = sched_cls(fps, policy.chunk_size, args.m, mode=args.mode, horizon=args.horizon, blend_s=args.blend_s)
     safety = safety_cls(policy.a_min, policy.a_max, 0.15, 1.5)
     hold = qpos_rec[0].copy()
     safety.reset(hold)
-    follower = SimFollower(hold)
+    follower = SimFollower(hold, offset)
     lat = args.latency_ms / 1000
     t_end = (n - 1) / fps
     taus = np.arange(0, t_end, 1 / CONTROL_HZ)
@@ -192,6 +220,7 @@ def main() -> None:
         eps = eps[: args.max_episodes]
     if not eps:
         raise SystemExit(f"no {args.split} episodes in {labels_of(policies)}")
+    offset = follower_offset(store, store.episodes(task), fps)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     pool = ThreadPoolExecutor(16)
@@ -211,7 +240,7 @@ def main() -> None:
                     if np.abs(ref - pre[n // 2]).max() > 1e-3:
                         raise SystemExit("batched prediction differs from Policy.predict_prepared")
                     checked = True
-            sim = simulate(pol, ActionScheduler, SafetyFilter, images, qpos, fps, args, pre)
+            sim = simulate(pol, ActionScheduler, SafetyFilter, images, qpos, fps, args, pre, offset)
             results[name][e["name"]] = {**metrics(sim["t"], sim["cmd"], leader, fps, pol.action_shift),
                                         "n_pred": sim["n_pred"]}
             sims[name] = sim
