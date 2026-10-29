@@ -26,15 +26,16 @@
 
 ```text
 yam_train/
-├── configs/           act_ref.yaml（源码全部默认值）+ {block_bowl,blue_cup}_{abs,delta}.yaml（_base_ 继承）
+├── configs/           act_ref.yaml（源码全部默认值）→ long.yaml（20000 epoch）→ {block_bowl,blue_cup}_{abs,delta}.yaml（_base_ 继承）
 ├── yam_train/
 │   ├── detr/          从 tonyzhaozh/act 原样拷贝的网络（不要改；改动记 docs/VENDORED.md）
 │   ├── policy.py      源码 ACTPolicy + 优化器
 │   ├── config.py      YAML 读取（_base_ 继承、--set a.b=c 覆盖）
 │   ├── data/          nedf3.py 读录制 / convert.py 转数据（原始 JPEG）/ dataset.py = 源码 utils.py
 │   ├── train.py       = 源码 train_bc，单卡，一个任务一个模型
-│   └── tools/         eval_offline.py（时间集成开环评估）、export.py
+│   └── tools/         eval_offline.py（多个 ckpt 一起做时间集成开环评估 → 选模型）、export.py
 ├── scripts/setup_venv.sh  建 .venv（默认 torch 2.7.1+cu126，阿里云镜像；`cpu` 参数给无 GPU 机器）
+├── scripts/train_all.sh   4 卡后台启动 8 个训练：任务 × abs/delta × 80/20 划分 / 全部数据（_all，交付用）
 └── docs/              07 当前主线 act_ref；06 旧方案与 ACT 对比；01–05 旧方案 act_v2；VENDORED.md
 ```
 

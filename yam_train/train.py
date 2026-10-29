@@ -12,6 +12,9 @@ Writes into --out (default runs/<config name>):
     metrics.jsonl     one line per epoch (train/val loss, l1, kl) + "extra" z=0 evaluations
     curves.png        refreshed at every checkpoint
     ckpt/epoch_XXXXX.pt, ckpt/last.pt, ckpt/best.pt (lowest val loss, like policy_best.ckpt)
+best.pt is kept for parity with the source only: the val loss is 1 random frame per val episode
+(10 samples) with the posterior z, so its minimum is mostly noise.  Choose among last.pt / epoch_*.pt
+with `tools.eval_offline --ckpt A B C ...` (z = 0, temporal aggregation, every val frame).
 """
 
 from __future__ import annotations
@@ -79,14 +82,14 @@ def extra_eval(policy, ds: EpisodicDataset, samples, device, batch: int) -> dict
     first_sum = np.zeros(14)
     n_valid = 0
     for i in range(0, len(samples), batch):
-        part = samples[i:i + batch]
+        part = samples[i : i + batch]
         items = [ds.sample(ep, t) for ep, t in part]
         img = torch.stack([it[0] for it in items]).to(device).float() / 255.0
         qn = torch.stack([it[1] for it in items]).to(device)
         pred = policy.predict(qn, img).float().cpu().numpy()
         for (ep, t), p in zip(part, pred, strict=True):
             s, n = ep["start"], ep["length"]
-            q, a = store.qpos[s:s + n], store.action[s:s + n]
+            q, a = store.qpos[s : s + n], store.action[s : s + n]
             gt, is_pad = chunk_targets(q, a, t, ds.chunk_size, ds.action_shift, "abs")
             pa = to_absolute(p, q[t], st, ds.action_mode)
             valid = ~is_pad
@@ -95,9 +98,12 @@ def extra_eval(policy, ds: EpisodicDataset, samples, device, batch: int) -> dict
             n_valid += int(valid.sum())
     err, first = err_sum / max(n_valid, 1), first_sum / max(len(samples), 1)
     return {
-        "right_arm_rad": float(err[7:13].mean()), "right_grip": float(err[13]),
-        "left_arm_rad": float(err[0:6].mean()), "left_grip": float(err[6]),
-        "first_step_right_arm_rad": float(first[7:13].mean()), "first_step_right_grip": float(first[13]),
+        "right_arm_rad": float(err[7:13].mean()),
+        "right_grip": float(err[13]),
+        "left_arm_rad": float(err[0:6].mean()),
+        "left_grip": float(err[6]),
+        "first_step_right_arm_rad": float(first[7:13].mean()),
+        "first_step_right_grip": float(first[13]),
     }
 
 
@@ -152,6 +158,8 @@ def main() -> None:
     if not d.get("task"):
         raise SystemExit("data.task is not set (one model per task)")
     out = Path(args.out or f"runs/{cfg['name']}")
+    if (out / "metrics.jsonl").is_file() and (out / "metrics.jsonl").stat().st_size > 0:
+        raise SystemExit(f"{out} already holds a run (metrics.jsonl); use another --out or remove it")
     (out / "ckpt").mkdir(parents=True, exist_ok=True)
     device = torch.device(tc.get("device", "cuda") if torch.cuda.is_available() else "cpu")
 
@@ -163,8 +171,13 @@ def main() -> None:
     train_eps, val_eps = [eps[i] for i in tr_idx], [eps[i] for i in va_idx]
     stats_eps = eps if d["norm_stats_from"] == "all" else train_eps
     stats = norm_stats(store, stats_eps, pc["chunk_size"], d["action_shift"], d["action_mode"])
-    ds_kw = {"camera_names": d["camera_names"], "norm_stats": stats, "chunk_size": pc["chunk_size"],
-             "action_shift": d["action_shift"], "action_mode": d["action_mode"]}
+    ds_kw = {
+        "camera_names": d["camera_names"],
+        "norm_stats": stats,
+        "chunk_size": pc["chunk_size"],
+        "action_shift": d["action_shift"],
+        "action_mode": d["action_mode"],
+    }
     train_ds = EpisodicDataset(store, train_eps, **ds_kw)
     val_ds = EpisodicDataset(store, val_eps, **ds_kw)
     nw = int(tc.get("num_workers", 1))
@@ -181,8 +194,9 @@ def main() -> None:
     n_params = sum(x.numel() for x in policy.parameters() if x.requires_grad)
 
     split_info = {"train_episodes": [e["name"] for e in train_eps], "val_episodes": [e["name"] for e in val_eps]}
-    (out / "config.yaml").write_text(yaml.safe_dump({**cfg, **split_info, "params_M": n_params / 1e6},
-                                                    sort_keys=False, allow_unicode=True))
+    (out / "config.yaml").write_text(
+        yaml.safe_dump({**cfg, **split_info, "params_M": n_params / 1e6}, sort_keys=False, allow_unicode=True)
+    )
     ckpt_common = {
         "format": CKPT_FORMAT,
         "config": cfg,
@@ -205,8 +219,11 @@ def main() -> None:
     extra_val = fixed_samples(val_eps, int(tc.get("extra_eval_samples", 256)))
     extra_train = fixed_samples(train_eps, int(tc.get("extra_eval_samples", 256)))
     metrics = (out / "metrics.jsonl").open("a")
-    print(f"task {d['task']}  action_mode {d['action_mode']}  params {n_params / 1e6:.2f}M  "
-          f"train eps {len(train_eps)}  val eps {len(val_eps)}  device {device}", flush=True)
+    print(
+        f"task {d['task']}  action_mode {d['action_mode']}  params {n_params / 1e6:.2f}M  "
+        f"train eps {len(train_eps)}  val eps {len(val_eps)}  device {device}",
+        flush=True,
+    )
 
     num_epochs = tc["num_epochs"]
     min_val_loss = np.inf
@@ -244,18 +261,29 @@ def main() -> None:
 
         last_epoch = epoch == num_epochs - 1
         if extra_every and (epoch % extra_every == 0 or last_epoch):
-            ex = {"kind": "extra", "epoch": epoch,
-                  "val": extra_eval(policy, val_ds, extra_val, device, tc["batch_size"]) if extra_val else None,
-                  "train": extra_eval(policy, train_ds, extra_train, device, tc["batch_size"])}
+            ex = {
+                "kind": "extra",
+                "epoch": epoch,
+                "val": extra_eval(policy, val_ds, extra_val, device, tc["batch_size"]) if extra_val else None,
+                "train": extra_eval(policy, train_ds, extra_train, device, tc["batch_size"]),
+            }
             metrics.write(json.dumps(ex) + "\n")
             metrics.flush()
             v = ex["val"] or ex["train"]
-            print(f"  [z=0] epoch {epoch}  right arm {v['right_arm_rad']:.4f} rad  "
-                  f"first-step {v['first_step_right_arm_rad']:.4f}  grip {v['right_grip']:.4f}", flush=True)
+            print(
+                f"  [z=0] epoch {epoch}  right arm {v['right_arm_rad']:.4f} rad  "
+                f"first-step {v['first_step_right_arm_rad']:.4f}  grip {v['right_grip']:.4f}",
+                flush=True,
+            )
         if epoch % 10 == 0 or last_epoch:
             val_str = f"val {rec['val']['loss']:.5f}  " if "val" in rec else ""
-            print(f"epoch {epoch}  {val_str}train {rec['train']['loss']:.5f}  "
-                  f"(l1 {rec['train']['l1']:.4f} kl {rec['train']['kl']:.4f})  {rec['time'] / 60:.1f} min", flush=True)
+            eta_h = rec["time"] / (epoch + 1) * (num_epochs - epoch - 1) / 3600
+            print(
+                f"epoch {epoch}  {val_str}train {rec['train']['loss']:.5f}  "
+                f"(l1 {rec['train']['l1']:.4f} kl {rec['train']['kl']:.4f})  {rec['time'] / 60:.1f} min  "
+                f"eta {eta_h:.1f} h",
+                flush=True,
+            )
         if epoch > 0 and epoch % tc["save_every"] == 0:
             save(out / "ckpt" / f"epoch_{epoch:05d}.pt", policy.state_dict(), epoch)
             plot_curves(out)

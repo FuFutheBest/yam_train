@@ -1,5 +1,5 @@
 # ACT as tonyzhaozh/act (imitate_episodes.py + README); only action_shift differs.
-# Experiments inherit it with `_base_: act_ref.yaml` and change only the diff.
+# Experiments inherit it (via long.yaml) with `_base_:` and change only the diff.
 
 data:
   # output of `python -m yam_train.data.convert`

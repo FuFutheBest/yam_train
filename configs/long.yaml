@@ -1,0 +1,20 @@
+# act_ref.yaml (= the ACT source) + a longer schedule.
+# Only `train:` bookkeeping changes; each update is the source's.
+#
+# Why longer: 5000 epochs here = 5000 x ceil(39/8) = 25k updates
+# (one random frame per training episode per epoch).  ACT README:
+#   "if your ACT policy is jerky or pauses in the middle of an
+#   episode, just train for longer! Success rate and smoothness can
+#   improve way after loss plateaus"
+# The old act_v2 model paused mid-task on the robot.
+#   20000 epochs = 100k updates (39 train eps)
+#                / 140k (all 49-50 eps, data.train_ratio=1.0)
+# Pick the checkpoint with eval_offline (several at once) + robot
+# trials, NOT best.pt (min of a 10-sample val loss, docs/07).
+_base_: act_ref.yaml
+train:
+  num_epochs: 20000
+  save_every: 2000          # 10 checkpoints x 336 MB per run
+  # z=0 open-loop error on fixed samples (curves.png, 4th panel)
+  extra_eval_every: 250
+  extra_eval_samples: 512
