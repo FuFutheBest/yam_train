@@ -10,13 +10,13 @@ What is simulated (same objects / numbers as yam_infer/run.py):
                      ensemble: one prediction per frame; chunk: when scheduler.needs_new_chunk()
                      the chunk of frame k becomes available at T_k + latency, placed at t_obs = T_k
     control loop   : 100 Hz, yam_infer.control.scheduler.ActionScheduler.target_at -> SafetyFilter
-                     (margin 0.15 rad, 1.5 rad/s) -> left arm frozen at its start pose (run.py default)
+                     (margin 0.15 rad, 1.5 rad/s); --freeze-left = run.yaml control.freeze_left
     qpos input     : recorded  = the recorded follower state (open loop, isolates the network + executor)
                      sim       = a simulated follower driven by OUR commands (first-order lag 0.13 s +
                                  33 ms delay, fitted on the recordings: 0.0155 rad residual), so the
                                  network sees the consequences of its own actions in the joint input.
                                  Images stay recorded -> only the proprioceptive half of the loop.
-Compared with the human command leader(t - action_shift) at 100 Hz (right arm; left is frozen):
+Compared with the human command leader(t - action_shift) at 100 Hz (right arm = the working arm):
     err        mean |command - human| over the episode
     lag_ms     time shift that best aligns command with human (+ = command is late)
     end_err    |final command - final human| (did it get where the human got?)
@@ -120,7 +120,8 @@ def simulate(policy, sched_cls, safety_cls, images: np.ndarray, qpos_rec: np.nda
             pending.remove(item)
         raw = sched.target_at(tau)
         target = last if raw is None else raw.copy()
-        target[LEFT] = hold[LEFT]  # run.py: --move-left off by default
+        if args.freeze_left:  # yam_infer run.yaml control.freeze_left (currently false)
+            target[LEFT] = hold[LEFT]
         safe = safety(target, 1 / CONTROL_HZ)
         last = safe
         cmds[j] = safe
@@ -142,6 +143,7 @@ def metrics(t: np.ndarray, cmd: np.ndarray, leader: np.ndarray, fps: float, shif
     jerk = np.abs(np.diff(cmd[:, RIGHT], 2, axis=0)).mean() * 1e4
     return {
         "err": float(err[:, RIGHT].mean()), "grip_err": float(err[:, 13].mean()),
+        "left_err": float(err[:, 0:6].mean()),
         "lag_ms": int(lags[int(np.argmin(lag_err))]), "err_at_best_lag": float(np.min(lag_err)),
         "end_err": float(np.abs(cmd[-1, RIGHT] - human[-1, RIGHT]).mean()),
         "jerk": float(jerk),
@@ -162,6 +164,7 @@ def main() -> None:
     p.add_argument("--blend-s", type=float, default=0.1, help="chunk mode")
     p.add_argument("--feedback", choices=["recorded", "sim"], default="recorded")
     p.add_argument("--latency-ms", type=float, default=30.0)
+    p.add_argument("--freeze-left", action="store_true", help="hold the left arm (yam_infer control.freeze_left)")
     p.add_argument("--plots", type=int, default=3)
     p.add_argument("--device", default="auto")
     args = p.parse_args()
@@ -219,16 +222,19 @@ def main() -> None:
             plot(out, e["name"], sims, leader, qpos, fps, args)
     pool.shutdown()
 
-    keys = ["err", "grip_err", "lag_ms", "err_at_best_lag", "end_err", "jerk"]
+    keys = ["err", "grip_err", "left_err", "lag_ms", "err_at_best_lag", "end_err", "jerk"]
     mean = {nm: {k: float(np.mean([v[k] for v in r.values()])) for k in keys} for nm, r in results.items()}
     setting = (f"split {args.split} ({len(eps)} eps), {args.mode}"
                + (f" m={args.m}" if args.mode == "ensemble" else f" horizon={args.horizon} blend={args.blend_s}")
-               + f", qpos {args.feedback}, latency {args.latency_ms:.0f} ms")
-    lines = [setting, "", "| checkpoint | epoch | mode | R arm err | R grip err | lag ms | err @best lag | end err | jerk |",
-             "|---|---|---|---|---|---|---|---|---|"]
+               + f", qpos {args.feedback}, latency {args.latency_ms:.0f} ms"
+               + (", left frozen" if args.freeze_left else ""))
+    lines = [setting, "",
+             "| checkpoint | epoch | mode | R arm err | R grip err | L arm err | lag ms | err @best lag | end err | jerk |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for nm, (_pol, ck) in policies.items():
         m = mean[nm]
         lines.append(f"| {nm} | {ck['epoch']} | {ck['action_mode']} | {m['err']:.4f} | {m['grip_err']:.4f} | "
+                     f"{m['left_err']:.4f} | "
                      f"{m['lag_ms']:.0f} | {m['err_at_best_lag']:.4f} | {m['end_err']:.4f} | {m['jerk']:.2f} |")
     (out / "sim.md").write_text("\n".join(lines) + "\n")
     (out / "sim.json").write_text(json.dumps({"setting": setting, "mean": mean, "episodes": results}, indent=1))
