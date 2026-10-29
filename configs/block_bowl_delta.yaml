@@ -1,0 +1,6 @@
+# put_block_in_bowl: 49 eps; block left, bowl right (fixed relative position) -> put the block in the bowl
+# delta: target = leader joints - follower joints at the chunk start frame
+_base_: act_ref.yaml
+data:
+  task: put_block_in_bowl
+  action_mode: delta

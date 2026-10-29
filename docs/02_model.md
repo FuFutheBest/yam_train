@@ -1,5 +1,7 @@
 # 02 模型：ACT（Action Chunking with Transformers）
 
+> 本页描述旧方案 act_v2（自写 ACT，已交付 `act_v2_*.pt`）。当前主线见 [07_act_ref.md](07_act_ref.md)。
+
 ## 为什么选 ACT
 
 | 候选                | 优点                                                                                             | 缺点                                           | 结论    |

@@ -26,19 +26,24 @@
 
 ```text
 yam_train/
-├── yam_train/         训练代码（源自 ../opus_inference_train @5e547c7，只保留训练相关）
-│   ├── data/          nedf3.py 读原始录制 / convert.py 转 npy / dataset.py 切 chunk
-│   ├── model/act.py   ACT（ResNet18 + Transformer + CVAE）；改结构要同步 yam_infer
-│   ├── train.py       DDP 训练（metrics.jsonl / curves.png / tb / ckpt）
-│   └── tools/         eval_offline.py 验证集开环评估、export.py 导出交付模型
+├── configs/           act_ref.yaml（源码全部默认值）+ {block_bowl,blue_cup}_{abs,delta}.yaml（_base_ 继承）
+├── yam_train/
+│   ├── detr/          从 tonyzhaozh/act 原样拷贝的网络（不要改；改动记 docs/VENDORED.md）
+│   ├── policy.py      源码 ACTPolicy + 优化器
+│   ├── config.py      YAML 读取（_base_ 继承、--set a.b=c 覆盖）
+│   ├── data/          nedf3.py 读录制 / convert.py 转数据（原始 JPEG）/ dataset.py = 源码 utils.py
+│   ├── train.py       = 源码 train_bc，单卡，一个任务一个模型
+│   └── tools/         eval_offline.py（时间集成开环评估）、export.py
 ├── scripts/setup_venv.sh  建 .venv（默认 torch 2.7.1+cu126，阿里云镜像；`cpu` 参数给无 GPU 机器）
-└── docs/              01 数据 / 02 模型 / 03 训练 / 05 报告 / 06 与 ACT 原版对比
+└── docs/              07 当前主线 act_ref；06 旧方案与 ACT 对比；01–05 旧方案 act_v2；VENDORED.md
 ```
 
-- 不放推理代码（在 `../yam_infer`）。
+- 主线原则：**一切按 ACT 源码**。偏离只有两处：新增 `data.action_mode: delta`；`data.action_shift` 用 0（源码 1，理由见 docs/07）。新的改动必须做成配置项，默认值保持源码行为。
+- 不放推理代码（在 `../yam_infer`）；推理端需要的改动列在 docs/07_act_ref.md 末尾。
 - 本机 `.venv` 由 `bash scripts/setup_venv.sh cpu` 建立（torch CPU，只做静态检查/小测试）。`../opus_inference_train` 已弃用。
+- 训练数据：`../dataset/{put_block_in_bowl,put_blue_block_in_blue_cup}`（任务说明见各自 README.md）；`data/nedf3_30hz` 是 `convert --raw ../dataset` 的结果（不进 git）。
 
-## 已交付模型的来源（`../yam_infer/models/`）
+## 已交付模型的来源（`../yam_infer/models/`，旧方案 act_v2，代码见 git 提交 b258d75）
 
 | 模型                   | 训练参数（`torchrun --nproc_per_node 4 -m yam_train.train --data DATA ...`） | 说明                       |
 | ---------------------- | ---------------------------------------------------------------------------- | -------------------------- |

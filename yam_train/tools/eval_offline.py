@@ -1,10 +1,14 @@
-"""Open-loop check: replay held-out demos through the model and plot predicted vs human actions.
+"""Open-loop check on recorded episodes: predicted vs human (leader) actions.
 
-    python -m yam_train.tools.eval_offline --ckpt CKPT --data DATA --out DIR [--split val]
+    python -m yam_train.tools.eval_offline --ckpt runs/X/ckpt/best.pt --data DATA --out DIR \
+        [--split val|train|all] [--k 0.01 | --no-agg]
 
-For each episode: at every step feed the recorded images + follower state, take the
-temporally-ensembled action (same as the robot does) and compare with the leader (human) action.
-Writes one PNG per episode + summary.json (mean abs error per joint).
+At every timestep the recorded images + follower state are fed (z = 0) and the executed action is chosen
+like imitate_episodes.py::eval_bc:
+    temporal aggregation (default): average all chunks covering t, weights exp(-k * i), i = 0 is the OLDEST
+    --no-agg                         : query every chunk_size steps and play the chunk
+The target for step t is the label the model was trained on: leader(t - action_shift).
+Writes one PNG per episode + summary.json (mean |error| per joint).
 """
 
 from __future__ import annotations
@@ -16,55 +20,39 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from yam_train.data.dataset import ChunkDataset
-from yam_train.model.act import ACT, ACTConfig
+from yam_train.data.dataset import EpisodicDataset, FrameStore
+from yam_train.policy import ACTPolicy
+from yam_train.train import CKPT_FORMAT, to_absolute
 
-JOINT_NAMES = (
-    [f"L{i}" for i in range(6)] + ["L grip"] + [f"R{i}" for i in range(6)] + ["R grip"]
-)
+JOINT_NAMES = [f"L{i}" for i in range(6)] + ["L grip"] + [f"R{i}" for i in range(6)] + ["R grip"]
 
 
-def ensembled(chunks: np.ndarray, m: float = -0.3) -> np.ndarray:
-    """chunks (T,K,A) predicted at each step -> (T,A) temporally ensembled actions."""
-    t_len, k, _ = chunks.shape
-    out = np.zeros(chunks.shape[::2])
+def load_policy(path: str, device: torch.device):
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    if ck.get("format") != CKPT_FORMAT:
+        raise SystemExit(f"{path}: not a {CKPT_FORMAT} checkpoint")
+    pc = dict(ck["config"]["policy"])
+    policy = ACTPolicy(pc, ck["camera_names"])
+    policy.load_state_dict(ck["model"])
+    policy.to(device).eval()
+    stats = {k: np.asarray(v, np.float32) for k, v in ck["stats"].items()}
+    return policy, ck, stats
+
+
+def execute(chunks: np.ndarray, agg: bool, k: float) -> np.ndarray:
+    """chunks (T, K, A) predicted at every step -> (T, A) executed actions."""
+    t_len, kk, _ = chunks.shape
+    out = np.zeros((t_len, chunks.shape[2]))
     for t in range(t_len):
-        idx = [(s, t - s) for s in range(max(0, t - k + 1), t + 1)]
-        w = np.exp(-m * np.arange(len(idx)))
-        vals = np.stack([chunks[s, j] for s, j in idx])
-        out[t] = (vals * w[:, None]).sum(0) / w.sum()
+        if agg:
+            starts = range(max(0, t - kk + 1), t + 1)  # oldest first, like all_time_actions[:, t]
+            acts = np.stack([chunks[s, t - s] for s in starts])
+            w = np.exp(-k * np.arange(len(acts)))
+            out[t] = (acts * (w / w.sum())[:, None]).sum(0)
+        else:
+            s = t - t % kk
+            out[t] = chunks[s, t - s]
     return out
-
-
-class Checkpoint:
-    """Trained model + the normalisation stats stored in the checkpoint."""
-
-    def __init__(self, path: str | Path):
-        ck = torch.load(str(path), map_location="cpu", weights_only=False)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        cfg = ACTConfig(**{**ck["config"], "pretrained_backbone": False})
-        self.model = ACT(cfg)
-        self.model.load_state_dict(ck["model"])
-        self.model.to(self.device).eval()
-        self.chunk_size = cfg.chunk_size
-        self.tasks: list[str] = ck["tasks"]
-        self.fps = float(ck["fps"])
-        st = ck["stats"]
-        self.q_mean, self.q_std = np.asarray(st["qpos"]["mean"]), np.asarray(
-            st["qpos"]["std"]
-        )
-        self.action_mode = ck.get("action_mode", "abs")
-        norm = ck.get(
-            "action_norm", st["action"]
-        )  # stats of the network output (abs or delta)
-        self.a_mean, self.a_std = np.asarray(norm["mean"]), np.asarray(norm["std"])
-
-    def to_absolute(self, pred_norm: np.ndarray, qpos: np.ndarray) -> np.ndarray:
-        """normalised network output (..., K, 14) -> absolute joint targets."""
-        act = pred_norm * self.a_std + self.a_mean
-        if self.action_mode == "delta":
-            act = act + np.asarray(qpos)[..., None, :]
-        return act
 
 
 def main() -> None:
@@ -72,83 +60,68 @@ def main() -> None:
     p.add_argument("--ckpt", required=True)
     p.add_argument("--data", required=True)
     p.add_argument("--out", required=True)
-    p.add_argument("--split", default="val")
+    p.add_argument("--split", choices=["val", "train", "all"], default="val")
     p.add_argument("--max-episodes", type=int, default=20)
-    p.add_argument("--ensemble-m", type=float, default=-0.3)
+    p.add_argument("--k", type=float, default=0.01)
+    p.add_argument("--no-agg", action="store_true")
+    p.add_argument("--batch", type=int, default=16)
     args = p.parse_args()
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    policy, ck, stats = load_policy(args.ckpt, device)
+    store = FrameStore(args.data)
+    names = {"val": ck["val_episodes"], "train": ck["train_episodes"]}.get(args.split)
+    eps = [e for e in store.episodes(ck["task"]) if names is None or e["name"] in names]
+    ds = EpisodicDataset(store, eps, ck["camera_names"], stats, ck["chunk_size"], ck["action_shift"],
+                         ck["action_mode"])
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    policy = Checkpoint(args.ckpt)
-    ds = ChunkDataset(
-        args.data, args.split, policy.chunk_size
-    )  # abs actions = ground truth
+    shift, fps = ck["action_shift"], ck["fps"]
     summary = {}
-    for e in ds.eps[: args.max_episodes]:
-        rows = np.arange(e["start"], e["start"] + e["length"])
-        qpos = ds.qpos[rows].astype(np.float64)
-        gt = ds.action[rows].astype(np.float64)
+    for e in eps[: args.max_episodes]:
+        s, n = e["start"], e["length"]
+        qpos, leader = store.qpos[s:s + n], store.action[s:s + n]
         chunks = []
-        for i0 in range(0, len(rows), 64):
-            r = rows[i0 : i0 + 64]
-            imgs = torch.from_numpy(np.ascontiguousarray(ds.images[r])).to(
-                policy.device
-            )
-            imgs = imgs.permute(0, 1, 4, 2, 3).float() / 255.0
-            q = torch.from_numpy(
-                ((qpos[i0 : i0 + 64] - policy.q_mean) / policy.q_std).astype(np.float32)
-            )
-            t = torch.full(
-                (len(r),), policy.tasks.index(e["task"]), device=policy.device
-            )
-            with torch.no_grad(), torch.autocast(
-                "cuda", dtype=torch.bfloat16, enabled=policy.device.type == "cuda"
-            ):
-                pred, _, _ = policy.model(imgs, q.to(policy.device), t)
-            chunks.append(
-                policy.to_absolute(pred.float().cpu().numpy(), qpos[i0 : i0 + 64])
-            )
+        with torch.inference_mode():
+            for t0 in range(0, n, args.batch):
+                items = [ds.sample(e, t) for t in range(t0, min(n, t0 + args.batch))]
+                img = torch.stack([it[0] for it in items]).to(device).float() / 255.0
+                qn = torch.stack([it[1] for it in items]).to(device)
+                pred = policy.predict(qn, img).float().cpu().numpy()
+                chunks.append(to_absolute(pred, qpos[t0:t0 + len(items)], stats, ck["action_mode"]))
         chunks = np.concatenate(chunks)
-        ens = ensembled(chunks, args.ensemble_m)
-        err = np.abs(ens - gt).mean(0)
-        first_err = np.abs(chunks[:, 0] - gt).mean(0)
-        summary[e["name"]] = {
-            n: float(v) for n, v in zip(JOINT_NAMES, err, strict=True)
-        }
+        executed = execute(chunks, not args.no_agg, args.k)
+        gt = leader[np.maximum(np.arange(n) - shift, 0)]
+        err = np.abs(executed - gt).mean(0)
+        first = np.abs(chunks[:, 0] - gt).mean(0)
+        summary[e["name"]] = {nm: float(v) for nm, v in zip(JOINT_NAMES, err, strict=True)}
+        summary[e["name"]]["first_step_right_arm"] = float(first[7:13].mean())
 
         fig, axes = plt.subplots(2, 7, figsize=(24, 6), sharex=True)
-        tt = np.arange(len(rows)) / policy.fps
-        for d, ax in enumerate(axes.flat):
-            ax.plot(tt, gt[:, d], "k-", lw=1.5, label="human (leader)")
-            ax.plot(tt, ens[:, d], "r-", lw=1, label="model")
-            ax.plot(tt, qpos[:, d], "b:", lw=1, label="follower state")
-            ax.set_title(f"{JOINT_NAMES[d]}  err {err[d]:.3f}")
+        tt = np.arange(n) / fps
+        for dim, ax in enumerate(axes.flat):
+            ax.plot(tt, gt[:, dim], "k-", lw=1.5, label="human (leader)")
+            ax.plot(tt, executed[:, dim], "r-", lw=1, label="model")
+            ax.plot(tt, qpos[:, dim], "b:", lw=1, label="follower state")
+            ax.set_title(f"{JOINT_NAMES[dim]}  err {err[dim]:.3f}")
             ax.grid(alpha=0.3)
         axes[0, 0].legend(fontsize=7)
-        fig.suptitle(f"{e['name']}  (open-loop on recorded observations)")
+        mode = "chunk playback" if args.no_agg else f"temporal agg k={args.k}"
+        fig.suptitle(f"{e['name']}  open-loop, {mode}, epoch {ck['epoch']}")
         fig.tight_layout()
         fig.savefig(out / f"{e['name'].replace('/', '__')}.png", dpi=80)
         plt.close(fig)
-        summary[e["name"]]["first_step_right_arm"] = float(first_err[7:13].mean())
-        summary[e["name"]]["first_step_left_arm"] = float(first_err[0:6].mean())
-        print(
-            f"{e['name']}: ensembled right arm {err[7:13].mean():.4f} rad, grip {err[13]:.4f} | "
-            f"first-step right {first_err[7:13].mean():.4f} left {first_err[0:6].mean():.4f}"
-        )
-    keys = [*JOINT_NAMES, "first_step_right_arm", "first_step_left_arm"]
-    agg = {n: float(np.mean([s[n] for s in summary.values()])) for n in keys}
-    (out / "summary.json").write_text(
-        json.dumps({"mean": agg, "episodes": summary}, indent=1)
-    )
-    print(
-        f"MEAN ensembled right arm {np.mean([agg[f'R{i}'] for i in range(6)]):.4f}  "
-        f"left arm {np.mean([agg[f'L{i}'] for i in range(6)]):.4f}  right grip {agg['R grip']:.4f}  "
-        f"first-step right {agg['first_step_right_arm']:.4f} left {agg['first_step_left_arm']:.4f}"
-    )
+        print(f"{e['name']}: right arm {err[7:13].mean():.4f} rad  grip {err[13]:.4f}  "
+              f"first-step right {first[7:13].mean():.4f}")
+    keys = [*JOINT_NAMES, "first_step_right_arm"]
+    agg = {k: float(np.mean([v[k] for v in summary.values()])) for k in keys}
+    (out / "summary.json").write_text(json.dumps({"ckpt": args.ckpt, "mean": agg, "episodes": summary}, indent=1))
+    print(f"MEAN right arm {np.mean([agg[f'R{i}'] for i in range(6)]):.4f} rad  grip {agg['R grip']:.4f}  "
+          f"first-step right {agg['first_step_right_arm']:.4f}")
 
 
 if __name__ == "__main__":

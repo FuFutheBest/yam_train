@@ -1,0 +1,54 @@
+# ACT as tonyzhaozh/act (imitate_episodes.py + README); only action_shift differs.
+# Experiments inherit it with `_base_: act_ref.yaml` and change only the diff.
+
+data:
+  # output of `python -m yam_train.data.convert`
+  root: data/nedf3_30hz     # convert --raw ../dataset --out data/nedf3_30hz
+  # one model per task, like the source (no task conditioning)
+  task: null
+  camera_names: [right_wrist, left_wrist]
+  train_ratio: 0.8          # utils.py::load_data
+  split_seed: 1             # imitate_episodes.py: set_seed(1) before load_data
+  # utils.py::get_norm_stats uses all episodes (all | train)
+  norm_stats_from: all
+  # chunk step 0 = leader(t - action_shift). The ONLY deviation from the source:
+  # source real-robot branch uses 1 (ALOHA "hack, to make timesteps more aligned").
+  # Our recordings are aligned by timestamp (wrist image and follower joints
+  # measured in the same frame), so leader(t) is the command at observation t.
+  action_shift: 0
+  # target for chunk step k, observation at time t:
+  #   abs   : leader(t - action_shift + k)           <- source
+  #   delta : leader(t - action_shift + k) - follower(t)
+  #           (relative to the chunk's first observed follower state)
+  action_mode: abs
+
+# names as in the source; values from imitate_episodes.py / README / Table III
+policy:
+  chunk_size: 100
+  kl_weight: 10
+  hidden_dim: 512
+  dim_feedforward: 3200
+  enc_layers: 4
+  dec_layers: 7
+  nheads: 8
+  dropout: 0.1
+  pre_norm: false
+  backbone: resnet18
+  position_embedding: sine
+  dilation: false
+  masks: false
+  lr: 1.0e-5
+  lr_backbone: 1.0e-5
+  weight_decay: 1.0e-4
+
+train:
+  batch_size: 8             # used for train and val, like the source
+  num_epochs: 5000          # README: real-world data -> at least 5000
+  seed: 0
+  # --- not in the source; none of these change the optimisation ---
+  num_workers: 4            # source: 1 (speed only)
+  save_every: 500           # source: every 100 epochs (~340 MB each)
+  # extra z=0 open-loop error in real units; 0 = off
+  extra_eval_every: 100
+  extra_eval_samples: 256
+  device: cuda

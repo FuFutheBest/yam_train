@@ -1,121 +1,103 @@
-"""Train ACT on the converted dataset.
+"""Train ACT exactly like tonyzhaozh/act `imitate_episodes.py::main/train_bc`, configured by a YAML file.
 
-Single GPU :  python -m yam_train.train --data DATA --out runs/NAME
-4 GPUs     :  torchrun --nproc_per_node 4 -m yam_train.train --data DATA --out runs/NAME
+    python -m yam_train.train --config configs/banana_abs.yaml [--set train.num_epochs=10 ...] [--out DIR]
 
-Writes into --out:
-    config.json        all hyper-parameters
-    metrics.jsonl      one JSON line per log event (train every --log-every, val every --val-every)
-    curves.png         loss curves (train vs val) — refreshed at each validation
-    tb/                TensorBoard events (if tensorboard is installed)
-    ckpt/step_XXXXX.pt , ckpt/last.pt , ckpt/best_val.pt
+One GPU per run (like the source); run different configs on different GPUs with CUDA_VISIBLE_DEVICES.
+
+Per epoch (same order as the source): validation pass (posterior z, eval mode) -> best-by-val-loss
+bookkeeping -> one pass over the training episodes (1 random timestep per episode).
+
+Writes into --out (default runs/<config name>):
+    config.yaml       resolved config + episode split
+    metrics.jsonl     one line per epoch (train/val loss, l1, kl) + "extra" z=0 evaluations
+    curves.png        refreshed at every checkpoint
+    ckpt/epoch_XXXXX.pt, ckpt/last.pt, ckpt/best.pt (lowest val loss, like policy_best.ckpt)
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
-import os
 import time
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
 import torch
-import torch.distributed as dist
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, DistributedSampler, Subset
+import yaml
+from torch.utils.data import DataLoader
 
-from yam_train.data.dataset import ChunkDataset
-from yam_train.model.act import ACT, ACTConfig, act_loss
+from yam_train.config import load_config
+from yam_train.data.dataset import EpisodicDataset, FrameStore, chunk_targets, norm_stats, split_episodes
+from yam_train.policy import ACTPolicy
 
-
-# ---------------------------------------------------------------- augmentation
-def augment(images: torch.Tensor, gen: torch.Generator | None = None) -> torch.Tensor:
-    """images float (B, n_cam, 3, H, W) in [0,1].  Small random shift/scale/rotation +
-    brightness/contrast/saturation jitter.  NO hue jitter: colour identifies the blue block/cup.
-    """
-    b, n, c, h, w = images.shape
-    x = images.reshape(b * n, c, h, w)
-    dev = x.device
-    k = b * n
-    scale = torch.empty(k, device=dev).uniform_(0.92, 1.0)
-    angle = torch.empty(k, device=dev).uniform_(-3, 3) * math.pi / 180
-    tx = torch.empty(k, device=dev).uniform_(-0.06, 0.06)
-    ty = torch.empty(k, device=dev).uniform_(-0.06, 0.06)
-    cos, sin = torch.cos(angle) * scale, torch.sin(angle) * scale
-    theta = torch.stack(
-        [torch.stack([cos, -sin, tx], 1), torch.stack([sin, cos, ty], 1)], 1
-    )
-    grid = F.affine_grid(theta, list(x.shape), align_corners=False)
-    x = F.grid_sample(
-        x, grid, mode="bilinear", padding_mode="reflection", align_corners=False
-    )
-
-    bright = torch.empty(k, 1, 1, 1, device=dev).uniform_(0.8, 1.2)
-    contrast = torch.empty(k, 1, 1, 1, device=dev).uniform_(0.8, 1.2)
-    sat = torch.empty(k, 1, 1, 1, device=dev).uniform_(0.85, 1.15)
-    x = x * bright
-    mean = x.mean(dim=(1, 2, 3), keepdim=True)
-    x = (x - mean) * contrast + mean
-    gray = 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
-    x = (x - gray) * sat + gray
-    return x.clamp(0, 1).reshape(b, n, c, h, w)
+CKPT_FORMAT = "yam_train/act_ref-v1"
 
 
-def to_device(batch: dict, device, train: bool):
-    imgs = (
-        batch["images"].to(device, non_blocking=True).permute(0, 1, 4, 2, 3).float()
-        / 255.0
-    )
-    if train:
-        imgs = augment(imgs)
-    qpos = batch["qpos"].to(device, non_blocking=True)
-    if train:
-        qpos = qpos + 0.01 * torch.randn_like(qpos)  # tiny state noise -> robustness
-    return (
-        imgs,
-        qpos,
-        batch["task"].to(device),
-        batch["actions"].to(device),
-        batch["is_pad"].to(device),
-    )
+def set_seed(seed: int) -> None:  # utils.py::set_seed
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
 
-# ---------------------------------------------------------------- evaluation
-@torch.no_grad()
-def evaluate(model, loader, device, a_std: torch.Tensor, max_batches: int) -> dict:
-    """Inference-mode (z=0) L1 error.  Also reports error in real units (rad / gripper 0..1)."""
-    model.eval()
-    tot, n = 0.0, 0
-    per_dim = torch.zeros(a_std.numel(), device=device)
-    first = torch.zeros(a_std.numel(), device=device)
+def compute_dict_mean(epoch_dicts: list[dict]) -> dict:  # utils.py::compute_dict_mean
+    return {k: sum(d[k] for d in epoch_dicts) / len(epoch_dicts) for k in epoch_dicts[0]}
+
+
+def forward_pass(data, policy, device):
+    image_data, qpos_data, action_data, is_pad = data
+    image_data = image_data.to(device, non_blocking=True).float() / 255.0  # source: image_data / 255.0
+    return policy(qpos_data.to(device), image_data, action_data.to(device), is_pad.to(device))
+
+
+# ---------------------------------------------------------------- extra (not in the source) evaluation
+def to_absolute(pred_norm: np.ndarray, qpos_raw: np.ndarray, stats: dict, mode: str) -> np.ndarray:
+    """network output (..., K, 14) normalised -> absolute leader joint targets."""
+    act = pred_norm * stats["action_std"] + stats["action_mean"]
+    if mode == "delta":
+        act = act + qpos_raw[..., None, :]
+    return act
+
+
+def fixed_samples(episodes: list[dict], n: int, seed: int = 12345) -> list[tuple[dict, int]]:
+    """Deterministic (episode, start_ts) pairs; uses its own RNG so training randomness is untouched."""
+    if not episodes:
+        return []
+    rng = np.random.RandomState(seed)
+    out = []
+    for _ in range(n):
+        ep = episodes[rng.randint(len(episodes))]
+        out.append((ep, int(rng.randint(ep["length"]))))
+    return out
+
+
+@torch.inference_mode()
+def extra_eval(policy, ds: EpisodicDataset, samples, device, batch: int) -> dict:
+    """z = 0 (as on the robot) mean |error| vs the human, in rad / gripper units, over the chunk."""
+    policy.eval()
+    st, store = ds.norm_stats, ds.store
+    err_sum = np.zeros(14)
+    first_sum = np.zeros(14)
     n_valid = 0
-    for i, batch in enumerate(loader):
-        if i >= max_batches:
-            break
-        imgs, qpos, task, actions, is_pad = to_device(batch, device, train=False)
-        with torch.autocast(
-            "cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"
-        ):
-            pred, _, _ = model(imgs, qpos, task)
-        pred = pred.float()
-        err = (pred - actions).abs() * (~is_pad)[..., None]
-        tot += err.sum().item() / actions.shape[-1]
-        n += (~is_pad).sum().item()
-        per_dim += (err * a_std).sum(dim=(0, 1))
-        first += ((pred[:, 0] - actions[:, 0]).abs() * a_std).sum(0)
-        n_valid += actions.shape[0]
-    model.train()
-    per_dim = (per_dim / max(n, 1)).cpu().numpy()
-    first = (first / max(n_valid, 1)).cpu().numpy()
+    for i in range(0, len(samples), batch):
+        part = samples[i:i + batch]
+        items = [ds.sample(ep, t) for ep, t in part]
+        img = torch.stack([it[0] for it in items]).to(device).float() / 255.0
+        qn = torch.stack([it[1] for it in items]).to(device)
+        pred = policy.predict(qn, img).float().cpu().numpy()
+        for (ep, t), p in zip(part, pred, strict=True):
+            s, n = ep["start"], ep["length"]
+            q, a = store.qpos[s:s + n], store.action[s:s + n]
+            gt, is_pad = chunk_targets(q, a, t, ds.chunk_size, ds.action_shift, "abs")
+            pa = to_absolute(p, q[t], st, ds.action_mode)
+            valid = ~is_pad
+            err_sum += np.abs(pa - gt)[valid].sum(0)
+            first_sum += np.abs(pa[0] - gt[0])
+            n_valid += int(valid.sum())
+    err, first = err_sum / max(n_valid, 1), first_sum / max(len(samples), 1)
     return {
-        "l1": tot / max(n, 1),
-        "right_arm_rad": float(per_dim[7:13].mean()),
-        "right_grip": float(per_dim[13]),
-        "left_arm_rad": float(per_dim[0:6].mean()),
-        "left_grip": float(per_dim[6]),
-        "first_step_right_arm_rad": float(first[7:13].mean()),
+        "right_arm_rad": float(err[7:13].mean()), "right_grip": float(err[13]),
+        "left_arm_rad": float(err[0:6].mean()), "left_grip": float(err[6]),
+        "first_step_right_arm_rad": float(first[7:13].mean()), "first_step_right_grip": float(first[13]),
     }
 
 
@@ -128,371 +110,163 @@ def plot_curves(out: Path) -> None:
     except ImportError:
         return
     try:
-        rows = [
-            json.loads(line)
-            for line in (out / "metrics.jsonl").read_text().splitlines()
-            if line
-        ]
+        rows = [json.loads(x) for x in (out / "metrics.jsonl").read_text().splitlines() if x]
     except (OSError, json.JSONDecodeError):
         return
-    tr = [r for r in rows if r["kind"] == "train"]
-    va = [r for r in rows if r["kind"] == "val"]
-    fig, ax = plt.subplots(1, 3, figsize=(18, 4.5))
-    if tr:
-        s = np.array([r["step"] for r in tr])
-        ax[0].plot(
-            s, [r["l1"] for r in tr], alpha=0.4, label="train L1 (with z from CVAE)"
-        )
-        ax[0].plot(s, [r["kl"] for r in tr], alpha=0.4, label="train KL")
-        ax[2].plot(s, [r["lr"] for r in tr])
-        ax[2].set_title("learning rate")
-    if va:
-        s = np.array([r["step"] for r in va])
-        ax[0].plot(
-            s, [r["val"]["l1"] for r in va], "o-", label="VAL L1 (z=0, like robot)"
-        )
-        ax[0].plot(s, [r["train_eval"]["l1"] for r in va], "s-", label="TRAIN L1 (z=0)")
-        ax[1].plot(
-            s,
-            [r["val"]["right_arm_rad"] for r in va],
-            "o-",
-            label="val right arm (rad)",
-        )
-        ax[1].plot(
-            s,
-            [r["train_eval"]["right_arm_rad"] for r in va],
-            "s--",
-            label="train right arm (rad)",
-        )
-        ax[1].plot(
-            s, [r["val"]["right_grip"] for r in va], "o-", label="val right gripper"
-        )
-        ax[1].plot(
-            s,
-            [r["train_eval"]["right_grip"] for r in va],
-            "s--",
-            label="train right gripper",
-        )
-    ax[0].set_yscale("log")
-    ax[0].set_title("loss (normalised units)")
-    ax[1].set_title("mean |error| over the action chunk, real units")
+    ep_rows = [r for r in rows if r["kind"] == "epoch"]
+    extra = [r for r in rows if r["kind"] == "extra"]
+    fig, ax = plt.subplots(1, 4, figsize=(22, 4.5))
+    e = np.array([r["epoch"] for r in ep_rows])
+    for i, key in enumerate(("loss", "l1", "kl")):
+        ax[i].plot(e, [r["train"][key] for r in ep_rows], alpha=0.6, label="train")
+        if ep_rows and ep_rows[0].get("val"):
+            ax[i].plot(e, [r["val"][key] for r in ep_rows], alpha=0.6, label="validation")
+        ax[i].set_yscale("log")
+        ax[i].set_title(key)
+    if extra:
+        x = [r["epoch"] for r in extra]
+        for split, style in (("val", "o-"), ("train", "s--")):
+            if extra[0].get(split):
+                for k in ("right_arm_rad", "first_step_right_arm_rad", "right_grip"):
+                    ax[3].plot(x, [r[split][k] for r in extra], style, ms=3, label=f"{split} {k}")
+        ax[3].set_title("z=0 mean |error| (rad / gripper)")
     for a in ax:
-        a.set_xlabel("step")
+        a.set_xlabel("epoch")
         a.grid(alpha=0.3)
-    ax[0].legend()
-    ax[1].legend()
+        a.legend(fontsize=7)
     fig.tight_layout()
-    fig.savefig(out / "curves.png", dpi=110)
+    fig.savefig(out / "curves.png", dpi=100)
     plt.close(fig)
-
-
-class MetricsLog:
-    """Append-only JSONL writer; a no-op on non-main DDP ranks."""
-
-    def __init__(self, path: Path | None):
-        self.path = path
-
-    def write(self, record: dict) -> None:
-        if self.path is None:
-            return
-        try:
-            with self.path.open("a") as fh:
-                fh.write(json.dumps(record) + "\n")
-        except OSError as exc:
-            print(f"warning: could not write metrics: {exc}", flush=True)
 
 
 # ---------------------------------------------------------------- main
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--data", required=True)
-    p.add_argument("--out", required=True)
-    p.add_argument("--steps", type=int, default=30000)
-    p.add_argument("--batch", type=int, default=32, help="per GPU")
-    p.add_argument("--lr", type=float, default=1e-4)
-    p.add_argument("--lr-backbone", type=float, default=2e-5)
-    p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--warmup", type=int, default=1000)
-    p.add_argument("--kl-weight", type=float, default=10.0)
-    p.add_argument("--chunk", type=int, default=50)
-    p.add_argument("--dec-layers", type=int, default=1)
-    p.add_argument(
-        "--train-split",
-        choices=["train", "all"],
-        default="train",
-        help="all = also train on the validation episodes (final model; val metrics then optimistic)",
-    )
-    p.add_argument(
-        "--action-mode",
-        choices=["abs", "delta"],
-        default="abs",
-        help="abs: absolute leader joints; delta: leader joints minus current follower state",
-    )
-    p.add_argument("--workers", type=int, default=8)
-    p.add_argument("--log-every", type=int, default=50)
-    p.add_argument("--val-every", type=int, default=1000)
-    p.add_argument("--val-batches", type=int, default=60)
-    p.add_argument("--save-every", type=int, default=5000)
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--resume", default="")
+    p.add_argument("--config", required=True)
+    p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override, e.g. train.seed=1")
+    p.add_argument("--out", default="")
     args = p.parse_args()
 
-    ddp = "RANK" in os.environ
-    if ddp:
-        dist.init_process_group("nccl")
-        rank, world = dist.get_rank(), dist.get_world_size()
-        local = int(os.environ["LOCAL_RANK"])
-    else:
-        rank, world, local = 0, 1, 0
-    device = torch.device(f"cuda:{local}" if torch.cuda.is_available() else "cpu")
-    if device.type == "cuda":
-        torch.cuda.set_device(device)
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
-    torch.manual_seed(args.seed + rank)
-    is_main = rank == 0
-    out = Path(args.out)
-    if is_main:
-        (out / "ckpt").mkdir(parents=True, exist_ok=True)
+    cfg = load_config(args.config, args.set)
+    d, pc, tc = cfg["data"], cfg["policy"], cfg["train"]
+    if not d.get("task"):
+        raise SystemExit("data.task is not set (one model per task)")
+    out = Path(args.out or f"runs/{cfg['name']}")
+    (out / "ckpt").mkdir(parents=True, exist_ok=True)
+    device = torch.device(tc.get("device", "cuda") if torch.cuda.is_available() else "cpu")
 
-    train_ds = ChunkDataset(
-        args.data, args.train_split, args.chunk, action_mode=args.action_mode
-    )
-    val_ds = ChunkDataset(
-        args.data,
-        "val",
-        args.chunk,
-        action_mode=args.action_mode,
-        action_stats=train_ds.action_stats,
-    )
-    meta = train_ds.meta
-    cfg = ACTConfig(
-        n_tasks=len(meta["tasks"]),
-        n_cameras=len(meta["cameras"]),
-        chunk_size=args.chunk,
-        n_decoder_layers=args.dec_layers,
-    )
-    model = ACT(cfg).to(device)
-    n_params = sum(p.numel() for p in model.parameters())
+    # ---- data (imitate_episodes.py::main -> set_seed(1); load_data)
+    set_seed(d["split_seed"])
+    store = FrameStore(d["root"])
+    eps = store.episodes(d["task"])
+    tr_idx, va_idx = split_episodes(len(eps), d["train_ratio"], d["split_seed"])
+    train_eps, val_eps = [eps[i] for i in tr_idx], [eps[i] for i in va_idx]
+    stats_eps = eps if d["norm_stats_from"] == "all" else train_eps
+    stats = norm_stats(store, stats_eps, pc["chunk_size"], d["action_shift"], d["action_mode"])
+    ds_kw = {"camera_names": d["camera_names"], "norm_stats": stats, "chunk_size": pc["chunk_size"],
+             "action_shift": d["action_shift"], "action_mode": d["action_mode"]}
+    train_ds = EpisodicDataset(store, train_eps, **ds_kw)
+    val_ds = EpisodicDataset(store, val_eps, **ds_kw)
+    nw = int(tc.get("num_workers", 1))
+    dl_kw = {"batch_size": tc["batch_size"], "shuffle": True, "pin_memory": True, "num_workers": nw}
+    if nw > 0:
+        dl_kw.update(prefetch_factor=2, persistent_workers=True)
+    train_loader = DataLoader(train_ds, **dl_kw)
+    val_loader = DataLoader(val_ds, **dl_kw) if val_eps else None
 
-    sampler = (
-        DistributedSampler(
-            train_ds, world, rank, shuffle=True, seed=args.seed, drop_last=True
-        )
-        if ddp
-        else None
-    )
-    loader = DataLoader(
-        train_ds,
-        batch_size=args.batch,
-        sampler=sampler,
-        shuffle=sampler is None,
-        num_workers=args.workers,
-        pin_memory=True,
-        drop_last=True,
-        persistent_workers=True,
-        prefetch_factor=4,
-    )
-    # fixed random subsets for comparable train-vs-val evaluation
-    rng = np.random.default_rng(0)
-    n_eval = args.val_batches * args.batch
-    val_sub = Subset(
-        val_ds,
-        rng.choice(len(val_ds), min(n_eval, len(val_ds)), replace=False).tolist(),
-    )
-    tr_sub = Subset(
-        train_ds,
-        rng.choice(len(train_ds), min(n_eval, len(train_ds)), replace=False).tolist(),
-    )
-    val_loader = DataLoader(val_sub, batch_size=args.batch, num_workers=4)
-    tr_eval_loader = DataLoader(tr_sub, batch_size=args.batch, num_workers=4)
-    a_std = torch.tensor(train_ds.a_std, device=device)
+    # ---- policy (train_bc -> set_seed(seed); make_policy; make_optimizer)
+    set_seed(tc["seed"])
+    policy = ACTPolicy(pc, d["camera_names"]).to(device)
+    optimizer = policy.configure_optimizers()
+    n_params = sum(x.numel() for x in policy.parameters() if x.requires_grad)
 
-    opt = torch.optim.AdamW(
-        [
-            {"params": model.other_parameters(), "lr": args.lr},
-            {"params": list(model.backbone_parameters()), "lr": args.lr_backbone},
-        ],
-        weight_decay=args.weight_decay,
-    )
-    base_lrs = [args.lr, args.lr_backbone]
-
-    def lr_factor(step: int) -> float:
-        if step < args.warmup:
-            return (step + 1) / args.warmup
-        prog = (step - args.warmup) / max(1, args.steps - args.warmup)
-        return 0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * min(prog, 1.0)))
-
-    step = 0
-    best_val = float("inf")
-    if args.resume:
-        ck = torch.load(args.resume, map_location="cpu", weights_only=False)
-        model.load_state_dict(ck["model"])
-        opt.load_state_dict(ck["optimizer"])
-        step = ck["step"]
-        best_val = ck.get("best_val", best_val)
-    dmodel = (
-        torch.nn.parallel.DistributedDataParallel(model, device_ids=[local])
-        if ddp
-        else model
-    )
-
+    split_info = {"train_episodes": [e["name"] for e in train_eps], "val_episodes": [e["name"] for e in val_eps]}
+    (out / "config.yaml").write_text(yaml.safe_dump({**cfg, **split_info, "params_M": n_params / 1e6},
+                                                    sort_keys=False, allow_unicode=True))
     ckpt_common = {
-        "config": cfg.to_dict(),
-        "stats": meta["stats"],
-        "tasks": meta["tasks"],
-        "cameras": meta["cameras"],
-        "image_size": meta["image_size"],
-        "fps": meta["fps"],
-        "start_pose": meta["start_pose"],
-        "state_layout": meta["state_layout"],
-        "action_mode": args.action_mode,
-        "action_norm": train_ds.action_stats,  # stats of what the network outputs (abs or delta)
+        "format": CKPT_FORMAT,
+        "config": cfg,
+        "stats": {k: v.tolist() for k, v in stats.items()},
+        "task": d["task"],
+        "camera_names": list(d["camera_names"]),
+        "image_size": store.meta["image_size"],
+        "fps": store.meta["fps"],
+        "chunk_size": pc["chunk_size"],
+        "action_mode": d["action_mode"],
+        "action_shift": d["action_shift"],
+        "start_pose": np.mean([store.qpos[e["start"]] for e in eps], axis=0).tolist(),
+        **split_info,
     }
 
-    def save(path: Path):
-        torch.save(
-            {
-                **ckpt_common,
-                "model": model.state_dict(),
-                "optimizer": opt.state_dict(),
-                "step": step,
-                "best_val": best_val,
-                "args": vars(args),
-            },
-            path,
-        )
+    def save(path: Path, state_dict: dict, epoch: int) -> None:
+        torch.save({**ckpt_common, "model": state_dict, "epoch": epoch}, path)
 
-    tb = None
-    if is_main:
-        (out / "config.json").write_text(
-            json.dumps(
-                {
-                    "args": vars(args),
-                    "model": cfg.to_dict(),
-                    "params_M": n_params / 1e6,
-                    "world_size": world,
-                    "train_steps_per_epoch": len(loader),
-                    "train_samples": len(train_ds),
-                    "val_samples": len(val_ds),
-                    "train_episodes": len(train_ds.eps),
-                    "val_episodes": [e["name"] for e in val_ds.eps],
-                },
-                indent=1,
-            )
-        )
-        try:
-            from torch.utils.tensorboard import SummaryWriter
+    extra_every = int(tc.get("extra_eval_every", 0))
+    extra_val = fixed_samples(val_eps, int(tc.get("extra_eval_samples", 256)))
+    extra_train = fixed_samples(train_eps, int(tc.get("extra_eval_samples", 256)))
+    metrics = (out / "metrics.jsonl").open("a")
+    print(f"task {d['task']}  action_mode {d['action_mode']}  params {n_params / 1e6:.2f}M  "
+          f"train eps {len(train_eps)}  val eps {len(val_eps)}  device {device}", flush=True)
 
-            tb = SummaryWriter(str(out / "tb"))
-        except Exception:  # noqa: BLE001 - tensorboard is optional
-            tb = None
-        print(
-            f"params {n_params / 1e6:.1f}M  train {len(train_ds)}  val {len(val_ds)}  "
-            f"steps/epoch {len(loader)}  world {world}",
-            flush=True,
-        )
+    num_epochs = tc["num_epochs"]
+    min_val_loss = np.inf
+    best_ckpt_info = None
+    t_start = time.time()
+    for epoch in range(num_epochs):
+        rec: dict = {"kind": "epoch", "epoch": epoch}
+        # validation
+        if val_loader is not None:
+            with torch.inference_mode():
+                policy.eval()
+                epoch_dicts = [forward_pass(data, policy, device) for data in val_loader]
+                epoch_summary = compute_dict_mean(epoch_dicts)
+                epoch_val_loss = epoch_summary["loss"]
+                if epoch_val_loss < min_val_loss:
+                    min_val_loss = epoch_val_loss
+                    best_ckpt_info = (epoch, min_val_loss, deepcopy(policy.state_dict()))
+            rec["val"] = {k: v.item() for k, v in epoch_summary.items()}
 
-    metrics_f = MetricsLog(out / "metrics.jsonl" if is_main else None)
-    epoch = step // max(1, len(loader))
-    t_last = time.time()
-    acc = {"loss": 0.0, "l1": 0.0, "kl": 0.0, "gn": 0.0, "n": 0}
-    dmodel.train()
-    while step < args.steps:
-        if sampler is not None:
-            sampler.set_epoch(epoch)
-        for batch in loader:
-            if step >= args.steps:
-                break
-            f = lr_factor(step)
-            for g, base in zip(opt.param_groups, base_lrs, strict=True):
-                g["lr"] = base * f
-            imgs, qpos, task, actions, is_pad = to_device(batch, device, train=True)
-            with torch.autocast(
-                "cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"
-            ):
-                pred, mu, logvar = dmodel(imgs, qpos, task, actions)
-            loss, l1, kl = act_loss(
-                pred.float(),
-                actions,
-                is_pad,
-                mu.float(),
-                logvar.float(),
-                args.kl_weight,
-            )
-            opt.zero_grad(set_to_none=True)
+        # training
+        policy.train()
+        optimizer.zero_grad()
+        train_dicts = []
+        for data in train_loader:
+            forward_dict = forward_pass(data, policy, device)
+            loss = forward_dict["loss"]
             loss.backward()
-            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
-            opt.step()
-            step += 1
-            acc["loss"] += loss.item()
-            acc["l1"] += l1.item()
-            acc["kl"] += kl.item()
-            acc["gn"] += gn.item()
-            acc["n"] += 1
+            optimizer.step()
+            optimizer.zero_grad()
+            train_dicts.append({k: v.detach() for k, v in forward_dict.items()})
+        rec["train"] = {k: v.item() for k, v in compute_dict_mean(train_dicts).items()}
+        rec["time"] = time.time() - t_start
+        metrics.write(json.dumps(rec) + "\n")
+        metrics.flush()
 
-            if is_main and step % args.log_every == 0:
-                dt = time.time() - t_last
-                t_last = time.time()
-                rec = {k: acc[k] / acc["n"] for k in ("loss", "l1", "kl", "gn")}
-                rec.update(
-                    kind="train",
-                    step=step,
-                    epoch=epoch,
-                    lr=opt.param_groups[0]["lr"],
-                    samples_per_s=acc["n"] * args.batch * world / dt,
-                    time=time.time(),
-                )
-                metrics_f.write(rec)
-                if tb:
-                    for k in ("loss", "l1", "kl", "gn", "lr", "samples_per_s"):
-                        tb.add_scalar(f"train/{k}", rec[k], step)
-                acc = dict.fromkeys(acc, 0.0)
-                acc["n"] = 0
-                if step % (args.log_every * 10) == 0:
-                    print(
-                        f"step {step} ep {epoch} loss {rec['loss']:.4f} l1 {rec['l1']:.4f} kl {rec['kl']:.3f} "
-                        f"lr {rec['lr']:.2e} {rec['samples_per_s']:.0f} samp/s",
-                        flush=True,
-                    )
+        last_epoch = epoch == num_epochs - 1
+        if extra_every and (epoch % extra_every == 0 or last_epoch):
+            ex = {"kind": "extra", "epoch": epoch,
+                  "val": extra_eval(policy, val_ds, extra_val, device, tc["batch_size"]) if extra_val else None,
+                  "train": extra_eval(policy, train_ds, extra_train, device, tc["batch_size"])}
+            metrics.write(json.dumps(ex) + "\n")
+            metrics.flush()
+            v = ex["val"] or ex["train"]
+            print(f"  [z=0] epoch {epoch}  right arm {v['right_arm_rad']:.4f} rad  "
+                  f"first-step {v['first_step_right_arm_rad']:.4f}  grip {v['right_grip']:.4f}", flush=True)
+        if epoch % 10 == 0 or last_epoch:
+            val_str = f"val {rec['val']['loss']:.5f}  " if "val" in rec else ""
+            print(f"epoch {epoch}  {val_str}train {rec['train']['loss']:.5f}  "
+                  f"(l1 {rec['train']['l1']:.4f} kl {rec['train']['kl']:.4f})  {rec['time'] / 60:.1f} min", flush=True)
+        if epoch > 0 and epoch % tc["save_every"] == 0:
+            save(out / "ckpt" / f"epoch_{epoch:05d}.pt", policy.state_dict(), epoch)
+            plot_curves(out)
 
-            if is_main and (step % args.val_every == 0 or step == args.steps):
-                v = evaluate(model, val_loader, device, a_std, args.val_batches)
-                te = evaluate(model, tr_eval_loader, device, a_std, args.val_batches)
-                metrics_f.write(
-                    {
-                        "kind": "val",
-                        "step": step,
-                        "epoch": epoch,
-                        "val": v,
-                        "train_eval": te,
-                        "time": time.time(),
-                    }
-                )
-                if tb:
-                    for k, val in v.items():
-                        tb.add_scalar(f"val/{k}", val, step)
-                    for k, val in te.items():
-                        tb.add_scalar(f"train_eval/{k}", val, step)
-                print(
-                    f"[val] step {step}  val l1 {v['l1']:.4f}  train l1 {te['l1']:.4f}  "
-                    f"val right-arm {v['right_arm_rad']:.4f} rad  grip {v['right_grip']:.4f}",
-                    flush=True,
-                )
-                if v["l1"] < best_val:
-                    best_val = v["l1"]
-                    save(out / "ckpt" / "best_val.pt")
-                plot_curves(out)
-            if is_main and (step % args.save_every == 0 or step == args.steps):
-                save(out / "ckpt" / f"step_{step:06d}.pt")
-                save(out / "ckpt" / "last.pt")
-        epoch += 1
-
-    if is_main:
-        print("training finished", flush=True)
-    if ddp:
-        dist.destroy_process_group()
+    save(out / "ckpt" / "last.pt", policy.state_dict(), num_epochs - 1)
+    if best_ckpt_info is not None:
+        best_epoch, min_val_loss, best_state_dict = best_ckpt_info
+        save(out / "ckpt" / "best.pt", best_state_dict, best_epoch)
+        print(f"Training finished: seed {tc['seed']}, val loss {min_val_loss:.6f} at epoch {best_epoch}", flush=True)
+    metrics.close()
+    plot_curves(out)
 
 
 if __name__ == "__main__":

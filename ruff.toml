@@ -1,0 +1,2 @@
+line-length = 120
+extend-exclude = ["yam_train/detr"]   # vendored verbatim from tonyzhaozh/act

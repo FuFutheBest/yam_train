@@ -4,5 +4,7 @@ mcap-protobuf-support
 protobuf
 numpy
 opencv-python-headless
+pyyaml
+packaging      # yam_train/detr/util/misc.py (vendored)
 tensorboard
 matplotlib

@@ -1,0 +1,6 @@
+# put_blue_block_in_blue_cup: 50 eps; 1-6 blocks, exactly one blue block + one blue cup -> blue block into blue cup
+# delta: target = leader joints - follower joints at the chunk start frame
+_base_: act_ref.yaml
+data:
+  task: put_blue_block_in_blue_cup
+  action_mode: delta

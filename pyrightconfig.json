@@ -2,5 +2,5 @@
   "venvPath": ".",
   "venv": ".venv",
   "extraPaths": ["."],
-  "exclude": [".venv", "runs", "models"]
+  "exclude": [".venv", "runs", "models", "data", "yam_train/detr"]
 }

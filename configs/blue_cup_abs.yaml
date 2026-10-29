@@ -1,0 +1,6 @@
+# put_blue_block_in_blue_cup: 50 eps; 1-6 blocks, exactly one blue block + one blue cup -> blue block into blue cup
+# abs: target = leader joints (source behaviour)
+_base_: act_ref.yaml
+data:
+  task: put_blue_block_in_blue_cup
+  action_mode: abs

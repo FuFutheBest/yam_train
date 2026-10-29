@@ -1,5 +1,7 @@
 # 05 训练报告与交付模型
 
+> 本页描述旧方案 act_v2（自写 ACT，已交付 `act_v2_*.pt`）。当前主线见 [07_act_ref.md](07_act_ref.md)。
+
 ## 实验时间线
 
 ```mermaid
