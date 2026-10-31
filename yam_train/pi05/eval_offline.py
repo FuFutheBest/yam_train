@@ -74,8 +74,10 @@ def main() -> None:
         close = int(np.argmax(A[:, g] < 0.5))
         for lead_s in LEADS_S:
             f = max(0, close - round(lead_s * fps))
-            out = policy.infer(observation(store, s + f, e["task"]))
-            infer_ms.append(out["policy_timing"]["infer_ms"])
+            obs = observation(store, s + f, e["task"])
+            t_inf = time.perf_counter()
+            out = policy.infer(obs)
+            infer_ms.append((time.perf_counter() - t_inf) * 1000)  # wall time incl. transforms
             chunk = out["actions"]
             r["grasp"][lead_s].append(float(np.abs(chunk[min(close - f, len(chunk) - 1), arm] - A[close, arm]).mean()))
         for f in range(0, L - 30, args.stride):
