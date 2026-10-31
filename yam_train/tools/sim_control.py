@@ -85,7 +85,7 @@ def follower_offset(store: FrameStore, eps: list[dict], fps: float) -> np.ndarra
     diffs = []
     for e in eps:
         s, n = e["start"], e["length"]
-        diffs.append(store.qpos[s:s + n] - lag_filter(store.action[s:s + n].astype(np.float64), fps))
+        diffs.append(store.qpos[s : s + n] - lag_filter(store.action[s : s + n].astype(np.float64), fps))
     off = np.concatenate(diffs).mean(0)
     off[[6, 13]] = 0.0
     return off
@@ -102,16 +102,27 @@ def batched_chunks(policy, images: np.ndarray, qpos: np.ndarray, batch: int = 32
     """= Policy.predict_prepared for every frame, batched (checked against it in main)."""
     out = []
     for i in range(0, len(qpos), batch):
-        img = torch.from_numpy(images[i:i + batch]).to(policy.device).permute(0, 1, 4, 2, 3).float().div_(255.0)
-        q = torch.from_numpy(((qpos[i:i + batch] - policy.q_mean) / policy.q_std).astype(np.float32)).to(policy.device)
+        img = torch.from_numpy(images[i : i + batch]).to(policy.device).permute(0, 1, 4, 2, 3).float().div_(255.0)
+        q = torch.from_numpy(((qpos[i : i + batch] - policy.q_mean) / policy.q_std).astype(np.float32)).to(
+            policy.device
+        )
         with torch.no_grad():
             raw = policy.net(q, img).float().cpu().numpy()
-        out.append(policy.to_absolute(raw, qpos[i:i + batch]))
+        out.append(policy.to_absolute(raw, qpos[i : i + batch]))
     return np.concatenate(out)
 
 
-def simulate(policy, sched_cls, safety_cls, images: np.ndarray, qpos_rec: np.ndarray, fps: float, args,
-             pre: np.ndarray | None, offset: np.ndarray) -> dict:
+def simulate(
+    policy,
+    sched_cls,
+    safety_cls,
+    images: np.ndarray,
+    qpos_rec: np.ndarray,
+    fps: float,
+    args,
+    pre: np.ndarray | None,
+    offset: np.ndarray,
+) -> dict:
     """One episode through the control stack. `pre` = precomputed chunks (recorded-qpos mode)."""
     n = len(qpos_rec)
     sched = sched_cls(fps, policy.chunk_size, args.m, mode=args.mode, horizon=args.horizon, blend_s=args.blend_s)
@@ -170,9 +181,11 @@ def metrics(t: np.ndarray, cmd: np.ndarray, leader: np.ndarray, fps: float, shif
         lag_err.append(np.abs(cmd[:, RIGHT] - h[:, RIGHT]).mean())
     jerk = np.abs(np.diff(cmd[:, RIGHT], 2, axis=0)).mean() * 1e4
     return {
-        "err": float(err[:, RIGHT].mean()), "grip_err": float(err[:, 13].mean()),
+        "err": float(err[:, RIGHT].mean()),
+        "grip_err": float(err[:, 13].mean()),
         "left_err": float(err[:, 0:6].mean()),
-        "lag_ms": int(lags[int(np.argmin(lag_err))]), "err_at_best_lag": float(np.min(lag_err)),
+        "lag_ms": int(lags[int(np.argmin(lag_err))]),
+        "err_at_best_lag": float(np.min(lag_err)),
         "end_err": float(np.abs(cmd[-1, RIGHT] - human[-1, RIGHT]).mean()),
         "jerk": float(jerk),
     }
@@ -207,8 +220,10 @@ def main() -> None:
     for c in args.ckpt:
         pth = Path(c)
         name = f"{pth.parent.parent.name}/{pth.stem}" if pth.parent.name == "ckpt" else pth.stem
-        policies[name] = (Policy(c, args.device, jpeg_roundtrip=False), torch.load(c, map_location="cpu",
-                                                                                  weights_only=False, mmap=True))
+        policies[name] = (
+            Policy(c, args.device, jpeg_roundtrip=False),
+            torch.load(c, map_location="cpu", weights_only=False, mmap=True),
+        )
     first_ck = next(iter(policies.values()))[1]
     task, cams, fps = first_ck["task"], first_ck["camera_names"], float(first_ck["fps"])
     for name, (pol, ck) in policies.items():
@@ -228,7 +243,7 @@ def main() -> None:
     checked = False
     for ei, e in enumerate(eps):
         s, n = e["start"], e["length"]
-        qpos, leader = store.qpos[s:s + n].astype(np.float64), store.action[s:s + n].astype(np.float64)
+        qpos, leader = store.qpos[s : s + n].astype(np.float64), store.action[s : s + n].astype(np.float64)
         images = np.stack(list(pool.map(lambda r: np.stack([store.image(c, r) for c in cams]), range(s, s + n))))
         sims = {}
         for name, (pol, ck) in policies.items():
@@ -241,30 +256,44 @@ def main() -> None:
                         raise SystemExit("batched prediction differs from Policy.predict_prepared")
                     checked = True
             sim = simulate(pol, ActionScheduler, SafetyFilter, images, qpos, fps, args, pre, offset)
-            results[name][e["name"]] = {**metrics(sim["t"], sim["cmd"], leader, fps, pol.action_shift),
-                                        "n_pred": sim["n_pred"]}
+            results[name][e["name"]] = {
+                **metrics(sim["t"], sim["cmd"], leader, fps, pol.action_shift),
+                "n_pred": sim["n_pred"],
+            }
             sims[name] = sim
-        print(f"[{ei + 1}/{len(eps)}] {e['name']}: " + "  ".join(
-            f"{nm} err {results[nm][e['name']]['err']:.4f} lag {results[nm][e['name']]['lag_ms']}ms"
-            for nm in policies), flush=True)
+        print(
+            f"[{ei + 1}/{len(eps)}] {e['name']}: "
+            + "  ".join(
+                f"{nm} err {results[nm][e['name']]['err']:.4f} lag {results[nm][e['name']]['lag_ms']}ms"
+                for nm in policies
+            ),
+            flush=True,
+        )
         if ei < args.plots:
             plot(out, e["name"], sims, leader, qpos, fps, args)
     pool.shutdown()
 
     keys = ["err", "grip_err", "left_err", "lag_ms", "err_at_best_lag", "end_err", "jerk"]
     mean = {nm: {k: float(np.mean([v[k] for v in r.values()])) for k in keys} for nm, r in results.items()}
-    setting = (f"split {args.split} ({len(eps)} eps), {args.mode}"
-               + (f" m={args.m}" if args.mode == "ensemble" else f" horizon={args.horizon} blend={args.blend_s}")
-               + f", qpos {args.feedback}, latency {args.latency_ms:.0f} ms"
-               + (", left frozen" if args.freeze_left else ""))
-    lines = [setting, "",
-             "| checkpoint | epoch | mode | R arm err | R grip err | L arm err | lag ms | err @best lag | end err | jerk |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+    setting = (
+        f"split {args.split} ({len(eps)} eps), {args.mode}"
+        + (f" m={args.m}" if args.mode == "ensemble" else f" horizon={args.horizon} blend={args.blend_s}")
+        + f", qpos {args.feedback}, latency {args.latency_ms:.0f} ms"
+        + (", left frozen" if args.freeze_left else "")
+    )
+    lines = [
+        setting,
+        "",
+        "| checkpoint | epoch | mode | R arm err | R grip err | L arm err | lag ms | err @best lag | end err | jerk |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
     for nm, (_pol, ck) in policies.items():
         m = mean[nm]
-        lines.append(f"| {nm} | {ck['epoch']} | {ck['action_mode']} | {m['err']:.4f} | {m['grip_err']:.4f} | "
-                     f"{m['left_err']:.4f} | "
-                     f"{m['lag_ms']:.0f} | {m['err_at_best_lag']:.4f} | {m['end_err']:.4f} | {m['jerk']:.2f} |")
+        lines.append(
+            f"| {nm} | {ck['epoch']} | {ck['action_mode']} | {m['err']:.4f} | {m['grip_err']:.4f} | "
+            f"{m['left_err']:.4f} | "
+            f"{m['lag_ms']:.0f} | {m['err_at_best_lag']:.4f} | {m['end_err']:.4f} | {m['jerk']:.2f} |"
+        )
     (out / "sim.md").write_text("\n".join(lines) + "\n")
     (out / "sim.json").write_text(json.dumps({"setting": setting, "mean": mean, "episodes": results}, indent=1))
     print("\n".join(lines))

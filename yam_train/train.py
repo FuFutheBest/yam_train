@@ -59,7 +59,7 @@ def augment_images(img: torch.Tensor, aug: dict) -> torch.Tensor:
         padded = torch.nn.functional.pad(x, (pw, pw, ph, ph), mode="replicate")
         oy = torch.randint(0, 2 * ph + 1, (n,)).tolist()
         ox = torch.randint(0, 2 * pw + 1, (n,)).tolist()
-        x = torch.stack([padded[i, :, oy[i]:oy[i] + h, ox[i]:ox[i] + w] for i in range(n)])
+        x = torch.stack([padded[i, :, oy[i] : oy[i] + h, ox[i] : ox[i] + w] for i in range(n)])
 
     def factor(v: float) -> torch.Tensor:
         return (1 + (torch.rand(n, 1, 1, 1, device=dev) * 2 - 1) * v) if v > 0 else torch.ones(1, device=dev)
@@ -67,7 +67,7 @@ def augment_images(img: torch.Tensor, aug: dict) -> torch.Tensor:
     x = x * factor(aug.get("brightness", 0))
     mean = x.mean(dim=(1, 2, 3), keepdim=True)
     x = (x - mean) * factor(aug.get("contrast", 0)) + mean
-    gray = (0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3])
+    gray = 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
     x = (x - gray) * factor(aug.get("saturation", 0)) + gray
     return x.clamp(0, 1).reshape(b, k, c, h, w)
 
