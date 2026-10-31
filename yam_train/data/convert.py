@@ -11,7 +11,11 @@ Every episode is resampled onto a uniform `fps` grid (default 30 Hz = camera rat
 joints/grippers are linearly interpolated, each camera uses its nearest frame.
 
     python -m yam_train.data.convert --raw RAW_DIR --out OUT_DIR [--workers 16]
-RAW_DIR contains <task>/episode_xxxx (SuperInference data/ layout).
+RAW_DIR contains <task>/episode_xxxx (SuperInference data/ layout).  Extra collections of the same task
+may sit one level deeper, <task>/<collection>/episode_xxxx (e.g. put_blue_block_in_blue_cup/blue_block_v2):
+the task is always the top directory, the episode name keeps the collection
+(put_blue_block_in_blue_cup/blue_block_v2/episode_0000).
+Episodes without data/mcap_index.json (recording not finalized, e.g. the app was stopped) are skipped.
 """
 
 from __future__ import annotations
@@ -34,8 +38,8 @@ def _nearest(ts_src: np.ndarray, ts_query: np.ndarray) -> np.ndarray:
     return np.where(ts_query - left <= right - ts_query, idx - 1, idx)
 
 
-def convert_episode(args: tuple[str, int]) -> dict:
-    path, fps = args
+def convert_episode(args: tuple[str, str, int]) -> dict:
+    path, name, fps = args
     ep = read_episode(path, load_images=True)
     missing = [c for c in CAMERAS if c not in ep.cameras]
     if missing:
@@ -62,7 +66,8 @@ def convert_episode(args: tuple[str, int]) -> dict:
     h, w = decode_jpeg_rgb(frames[next(iter(CAMERAS))][0]).shape[:2]
     return {
         "path": path,
-        "task": Path(path).parent.name,
+        "name": name,
+        "task": name.split("/")[0],
         "task_description": ep.task_description,
         "qpos": state14(ep, "follower", grid).astype(np.float32),
         "action": state14(ep, "leader", grid).astype(np.float32),
@@ -81,12 +86,20 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=16)
     args = parser.parse_args()
 
-    episodes = sorted(
-        p for p in args.raw.glob("*/episode_*") if p.is_dir() and not p.name.endswith("_inprogress")
+    found = sorted(
+        p for pattern in ("*/episode_*", "*/*/episode_*") for p in args.raw.glob(pattern)
+        if p.is_dir() and not p.name.endswith("_inprogress")
     )
+    episodes = []
+    for p in found:
+        if (p / "data" / "mcap_index.json").exists():
+            episodes.append(p)
+        else:
+            print(f"  skip {p.relative_to(args.raw)}: no data/mcap_index.json (recording not finalized)")
     if not episodes:
         raise SystemExit(f"no episodes under {args.raw}/<task>/episode_*")
-    tasks = sorted({p.parent.name for p in episodes})
+    names = [p.relative_to(args.raw).as_posix() for p in episodes]
+    tasks = sorted({n.split("/")[0] for n in names})
     print(f"{len(episodes)} episodes, tasks={tasks}")
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -97,7 +110,7 @@ def main() -> None:
     cursor = 0
     try:
         with ProcessPoolExecutor(args.workers) as pool:
-            for r in pool.map(convert_episode, [(str(p), args.fps) for p in episodes]):
+            for r in pool.map(convert_episode, [(str(p), n, args.fps) for p, n in zip(episodes, names)]):
                 n = len(r["qpos"])
                 if image_size is None:
                     image_size = r["image_size"]
@@ -112,7 +125,7 @@ def main() -> None:
                 qpos.append(r["qpos"])
                 action.append(r["action"])
                 meta_eps.append({
-                    "name": f"{r['task']}/{Path(r['path']).name}",
+                    "name": r["name"],
                     "task": r["task"],
                     "task_description": r["task_description"],
                     "start": cursor,

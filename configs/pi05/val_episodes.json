@@ -1,0 +1,5 @@
+{
+ "_comment": "held-out demos of the pi05 *_split run = the val episodes of the act_ref split runs (runs/{block_bowl,blue_cup}_{abs,delta}), so the open-loop numbers are comparable",
+ "put_block_in_bowl": ["put_block_in_bowl/episode_0000", "put_block_in_bowl/episode_0005", "put_block_in_bowl/episode_0008", "put_block_in_bowl/episode_0009", "put_block_in_bowl/episode_0011", "put_block_in_bowl/episode_0012", "put_block_in_bowl/episode_0015", "put_block_in_bowl/episode_0016", "put_block_in_bowl/episode_0038", "put_block_in_bowl/episode_0044"],
+ "put_blue_block_in_blue_cup": ["put_blue_block_in_blue_cup/episode_0000", "put_blue_block_in_blue_cup/episode_0005", "put_blue_block_in_blue_cup/episode_0008", "put_blue_block_in_blue_cup/episode_0009", "put_blue_block_in_blue_cup/episode_0011", "put_blue_block_in_blue_cup/episode_0012", "put_blue_block_in_blue_cup/episode_0015", "put_blue_block_in_blue_cup/episode_0016", "put_blue_block_in_blue_cup/episode_0037", "put_blue_block_in_blue_cup/episode_0043"]
+}

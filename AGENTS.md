@@ -22,6 +22,14 @@
 - 训练后网络可能还要调整，后续在同一会话继续迭代；保持代码、配置、日志可复现。
 - 不修改源项目 `SuperInference-feat-i2rt_NEDF3` 中的文件（只读引用其代码与数据）。
 
+## pi05 分支（pi0.5 / openpi）
+
+- 代码在 `yam_train/pi05/`，在 openpi 自己的 uv 环境里运行：`source scripts/pi05_env.sh` 后用 `$PI05_PY`。openpi 固定在 `215abfb`，由 `scripts/setup_openpi.sh` 安装到 `../openpi`。
+- 服务器目录：`~/output/fufu/yam_train_pi05`（不是 git 仓库，代码用 tar 同步）。服务器上的 openpi 在 `../openpi`，pi05_base 缓存在 `../.cache/openpi`。
+- 数据：`data/nedf3_30hz_v3`（新增 `blue_block_v2`），LeRobot 数据集放在 `lerobot/`，checkpoint 放在 `runs_pi05/`。
+- 说明见 `docs/08_pi05.md`；推理侧见 yam_infer 的 `pi05` 分支（`format: pi05`，websocket 连接策略服务）。
+- 本地做静态检查时需要 openpi 源码：`tmp/openpi`（已写入 pyrightconfig 的 extraPaths）。
+
 ## 仓库结构
 
 ```text
