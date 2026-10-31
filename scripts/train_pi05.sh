@@ -13,6 +13,7 @@ source scripts/pi05_env.sh
 EXP="${1:-run1}"
 mkdir -p logs
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+export PYTHONUNBUFFERED=1   # "Step N: loss=..." lines are print()ed; unbuffered so they reach the log at once
 OPENPI_COMMIT="$(git -C "$OPENPI_DIR" rev-parse --short HEAD)"
 export OPENPI_COMMIT
 start() { # gpus config

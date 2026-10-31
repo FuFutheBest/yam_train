@@ -47,12 +47,18 @@ class LeRobotYamDataConfig(_config.DataConfigFactory):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config) -> _config.DataConfig:
         # dataset keys -> the robot-side keys yam_infer sends at inference (only applied to dataset items)
-        repack = _transforms.Group(inputs=[_transforms.RepackTransform({
-            "images": {"right_wrist": "images.right_wrist", "left_wrist": "images.left_wrist"},
-            "state": "state",
-            "actions": "actions",
-            "prompt": "prompt",
-        })])
+        repack = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"right_wrist": "images.right_wrist", "left_wrist": "images.left_wrist"},
+                        "state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
         data_transforms = _transforms.Group(inputs=[YamInputs()], outputs=[YamOutputs()]).push(
             inputs=[_transforms.DeltaActions(DELTA_MASK)],
             outputs=[_transforms.AbsoluteActions(DELTA_MASK)],
@@ -68,8 +74,9 @@ class LeRobotYamDataConfig(_config.DataConfigFactory):
         )
 
 
-def make_config(name: str, repo_id: str, *, steps: int = 15_000, batch_size: int = 32,
-                fsdp_devices: int = 1) -> _config.TrainConfig:
+def make_config(
+    name: str, repo_id: str, *, steps: int = 15_000, batch_size: int = 32, fsdp_devices: int = 1
+) -> _config.TrainConfig:
     r = root()
     return _config.TrainConfig(
         name=name,

@@ -54,8 +54,10 @@ def write_info(store: FrameStore, episodes: list[dict], excluded: set[str], args
         "action_min": act.min(0).tolist(),
         "action_max": act.max(0).tolist(),
         # mean first follower state per task: yam_infer moves there before each episode
-        "start_pose": {t: np.mean([store.qpos[e["start"]] for e in episodes if e["task"] == t], axis=0).tolist()
-                       for t in args.tasks},
+        "start_pose": {
+            t: np.mean([store.qpos[e["start"]] for e in episodes if e["task"] == t], axis=0).tolist()
+            for t in args.tasks
+        },
     }
     (out / "yam_info.json").write_text(json.dumps(info, indent=1))
 
@@ -118,12 +120,14 @@ def main() -> None:
             rows = range(e["start"], e["start"] + e["length"])
             imgs = {c: list(pool.map(lambda r, c=c: model_image(store, c, r), rows)) for c in CAMERAS}
             for k, r in enumerate(rows):
-                ds.add_frame({
-                    **{f"images.{c}": imgs[c][k] for c in CAMERAS},
-                    "state": store.qpos[r].astype(np.float32),
-                    "actions": store.action[r].astype(np.float32),
-                    "task": PROMPTS[e["task"]],
-                })
+                ds.add_frame(
+                    {
+                        **{f"images.{c}": imgs[c][k] for c in CAMERAS},
+                        "state": store.qpos[r].astype(np.float32),
+                        "actions": store.action[r].astype(np.float32),
+                        "task": PROMPTS[e["task"]],
+                    }
+                )
             ds.save_episode()
             rows_total += e["length"]
             print(f"[{i + 1}/{len(episodes)}] {e['name']}: {e['length']} rows  ({time.time() - t0:.0f} s)", flush=True)

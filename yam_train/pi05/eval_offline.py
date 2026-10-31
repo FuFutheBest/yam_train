@@ -66,7 +66,7 @@ def main() -> None:
     t0 = time.time()
     for n, e in enumerate(sorted(eps, key=lambda e: e["name"])):
         s, L = e["start"], e["length"]
-        A = store.action[s:s + L]
+        A = store.action[s : s + L]
         right = A[:, 13].min() < A[:, 6].min()  # the arm that grasps
         g = 13 if right else 6
         arm = slice(g - 6, g)
@@ -80,16 +80,24 @@ def main() -> None:
             r["grasp"][lead_s].append(float(np.abs(chunk[min(close - f, len(chunk) - 1), arm] - A[close, arm]).mean()))
         for f in range(0, L - 30, args.stride):
             chunk = policy.infer(observation(store, s + f, e["task"]))["actions"]
-            r["e10"].append(float(np.abs(chunk[:10, arm] - A[f:f + 10, arm]).mean()))
-            r["e30"].append(float(np.abs(chunk[:30, arm] - A[f:f + 30, arm]).mean()))
-            r["grip30"].append(float(np.abs(chunk[:30, g] - A[f:f + 30, g]).mean()))
-        print(f"[{n + 1}/{len(eps)}] {e['name']}: grasp err 1s {r['grasp'][1.0][-1]:.3f}  ({time.time() - t0:.0f} s)",
-              flush=True)
+            r["e10"].append(float(np.abs(chunk[:10, arm] - A[f : f + 10, arm]).mean()))
+            r["e30"].append(float(np.abs(chunk[:30, arm] - A[f : f + 30, arm]).mean()))
+            r["grip30"].append(float(np.abs(chunk[:30, g] - A[f : f + 30, g]).mean()))
+        print(
+            f"[{n + 1}/{len(eps)}] {e['name']}: grasp err 1s {r['grasp'][1.0][-1]:.3f}  ({time.time() - t0:.0f} s)",
+            flush=True,
+        )
 
-    summary = {"model": str(args.model), "step": meta.get("step"), "infer_ms_median": float(np.median(infer_ms)),
-               "tasks": {}}
-    lines = ["| task | demos | grasp err 0.5 s | 1 s | 2 s | aimed (<0.04) @1 s | chunk err 10 | chunk err 30 | grip err 30 |",
-             "|---|---|---|---|---|---|---|---|---|"]
+    summary = {
+        "model": str(args.model),
+        "step": meta.get("step"),
+        "infer_ms_median": float(np.median(infer_ms)),
+        "tasks": {},
+    }
+    lines = [
+        "| task | demos | grasp err 0.5 s | 1 s | 2 s | aimed (<0.04) @1 s | chunk err 10 | chunk err 30 | grip err 30 |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
     for task, r in per_task.items():
         g = {k: np.array(v) for k, v in r["grasp"].items()}
         row = {
@@ -102,9 +110,11 @@ def main() -> None:
         }
         summary["tasks"][task] = row
         ge = row["grasp_err"]
-        lines.append(f"| {task} | {row['demos']} | {ge['0.5']:.3f} | {ge['1.0']:.3f} | {ge['2.0']:.3f} | "
-                     f"{row['aimed_1s']}/{row['demos']} | {row['chunk_err_10']:.3f} | {row['chunk_err_30']:.3f} | "
-                     f"{row['grip_err_30']:.3f} |")
+        lines.append(
+            f"| {task} | {row['demos']} | {ge['0.5']:.3f} | {ge['1.0']:.3f} | {ge['2.0']:.3f} | "
+            f"{row['aimed_1s']}/{row['demos']} | {row['chunk_err_10']:.3f} | {row['chunk_err_30']:.3f} | "
+            f"{row['grip_err_30']:.3f} |"
+        )
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps(summary, indent=1))
     (args.out / "summary.md").write_text("\n".join(lines) + "\n")
