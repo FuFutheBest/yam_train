@@ -10,7 +10,8 @@ Two numbers per task (right arm joints 0-5, rad):
                as for act_ref (v1 delta 1 s: block 0.029, blue cup 0.028).  "aimed" = error < 0.04 rad.
                pi0.5's chunk is 50 steps (1.67 s): the 2 s case reads the chunk's last step.
   chunk error  every 15th frame: mean |prediction - leader| over the first 10 / 30 steps (0.33 / 1 s)
-               and the gripper error over 30 steps.
+               and the gripper error over 30 steps.  "both arms 30": the 30-step error over all 12 arm joints
+               (what matters for the bimanual fold_towel / unroll_cylinder).
 
 What the robot gets is exactly this prediction (same transforms, same image preprocessing), only
 the timing of the closed loop is missing.
@@ -31,6 +32,7 @@ from yam_train.pi05.cli import load_model
 from yam_train.pi05.yam_policy import CAMERAS, MODEL_IMAGE_HW, PROMPTS
 
 LEADS_S = (0.5, 1.0, 2.0)
+ARMS = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]  # joints of both arms, no grippers
 
 
 def observation(store: FrameStore, row: int, task: str) -> dict:
@@ -70,7 +72,7 @@ def main() -> None:
         right = A[:, 13].min() < A[:, 6].min()  # the arm that grasps
         g = 13 if right else 6
         arm = slice(g - 6, g)
-        r = per_task.setdefault(e["task"], {"grasp": {x: [] for x in LEADS_S}, "e10": [], "e30": [], "grip30": []})
+        r = per_task.setdefault(e["task"], {"grasp": {x: [] for x in LEADS_S}, "e10": [], "e30": [], "grip30": [], "both30": []})
         close = int(np.argmax(A[:, g] < 0.5))
         for lead_s in LEADS_S:
             f = max(0, close - round(lead_s * fps))
@@ -85,6 +87,7 @@ def main() -> None:
             r["e10"].append(float(np.abs(chunk[:10, arm] - A[f : f + 10, arm]).mean()))
             r["e30"].append(float(np.abs(chunk[:30, arm] - A[f : f + 30, arm]).mean()))
             r["grip30"].append(float(np.abs(chunk[:30, g] - A[f : f + 30, g]).mean()))
+            r["both30"].append(float(np.abs(chunk[:30, ARMS] - A[f : f + 30, ARMS]).mean()))
         print(
             f"[{n + 1}/{len(eps)}] {e['name']}: grasp err 1s {r['grasp'][1.0][-1]:.3f}  ({time.time() - t0:.0f} s)",
             flush=True,
@@ -97,8 +100,8 @@ def main() -> None:
         "tasks": {},
     }
     lines = [
-        "| task | demos | grasp err 0.5 s | 1 s | 2 s | aimed (<0.04) @1 s | chunk err 10 | chunk err 30 | grip err 30 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| task | demos | grasp err 0.5 s | 1 s | 2 s | aimed (<0.04) @1 s | chunk err 10 | chunk err 30 | grip err 30 | both arms 30 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for task, r in per_task.items():
         g = {k: np.array(v) for k, v in r["grasp"].items()}
@@ -109,13 +112,14 @@ def main() -> None:
             "chunk_err_10": float(np.mean(r["e10"])),
             "chunk_err_30": float(np.mean(r["e30"])),
             "grip_err_30": float(np.mean(r["grip30"])),
+            "both_arms_err_30": float(np.mean(r["both30"])),
         }
         summary["tasks"][task] = row
         ge = row["grasp_err"]
         lines.append(
             f"| {task} | {row['demos']} | {ge['0.5']:.3f} | {ge['1.0']:.3f} | {ge['2.0']:.3f} | "
             f"{row['aimed_1s']}/{row['demos']} | {row['chunk_err_10']:.3f} | {row['chunk_err_30']:.3f} | "
-            f"{row['grip_err_30']:.3f} |"
+            f"{row['grip_err_30']:.3f} | {row['both_arms_err_30']:.3f} |"
         )
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps(summary, indent=1))

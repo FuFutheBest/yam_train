@@ -30,8 +30,13 @@ CAMERAS = ("right_wrist", "left_wrist")
 PROMPTS = {
     "put_block_in_bowl": "put the block in the bowl",
     "put_blue_block_in_blue_cup": "put the blue block in the blue cup",
+    "fold_towel": "fold the towel",
+    "unroll_cylinder": "hold the cylinder with both hands and pull the cap off",
 }
 
+# Which action dims are predicted relative to the current follower state (delta) - per config:
+#
+# DELTA_MASK (pi05_yam*, block_bowl + blue_cup: only the right arm works).
 # Right arm joints are predicted relative to the current follower state (delta: openpi's convention for
 # joint-space robots, and the act_ref finding that delta aims better at grasps); grippers absolute.
 # The LEFT arm joints stay absolute: in these demos the left arm stands still (every grasp is done by the
@@ -39,6 +44,11 @@ PROMPTS = {
 # normalisation would blow the rare real movements up to 100-300 (training targets are meant to be ~[-1, 1]).
 # Absolute left joints stay within +-1.5 after normalisation.
 DELTA_MASK = transforms.make_bool_mask(-7, 6, -1)
+
+# DELTA_MASK_BOTH (pi05_yam3*, with the bimanual fold_towel / unroll_cylinder): both arms' joints delta,
+# grippers absolute (openpi's aloha convention).  The left-arm movements of the bimanual tasks give the left
+# deltas a real 1%-99% range, so the normalisation problem above does not occur (checked in the norm stats).
+DELTA_MASK_BOTH = transforms.make_bool_mask(6, -1, 6, -1)
 
 
 def _hwc_uint8(img) -> np.ndarray:

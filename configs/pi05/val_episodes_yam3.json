@@ -1,0 +1,50 @@
+{
+ "_comment": "held-out demos of the pi05_yam3_split run = the val episodes of the act_ref split runs in yam_train_r3 (runs/{blue_cup,fold_towel,unroll_cylinder}_{abs,delta}: split_episodes(n, 0.8, seed 1) over the task's sorted episodes), so the open-loop numbers are comparable",
+ "put_blue_block_in_blue_cup": [
+  "put_blue_block_in_blue_cup/episode_0001",
+  "put_blue_block_in_blue_cup/episode_0005",
+  "put_blue_block_in_blue_cup/episode_0006",
+  "put_blue_block_in_blue_cup/episode_0009",
+  "put_blue_block_in_blue_cup/episode_0011",
+  "put_blue_block_in_blue_cup/episode_0012",
+  "put_blue_block_in_blue_cup/episode_0016",
+  "put_blue_block_in_blue_cup/episode_0018",
+  "put_blue_block_in_blue_cup/episode_0020",
+  "put_blue_block_in_blue_cup/episode_0025",
+  "put_blue_block_in_blue_cup/episode_0028",
+  "put_blue_block_in_blue_cup/episode_0029",
+  "put_blue_block_in_blue_cup/episode_0037",
+  "put_blue_block_in_blue_cup/episode_0050",
+  "put_blue_block_in_blue_cup/episode_0064",
+  "put_blue_block_in_blue_cup/episode_0071",
+  "put_blue_block_in_blue_cup/episode_0072",
+  "put_blue_block_in_blue_cup/episode_0075",
+  "put_blue_block_in_blue_cup/episode_0076",
+  "put_blue_block_in_blue_cup/episode_0079"
+ ],
+ "fold_towel": [
+  "fold_towel/episode_0000",
+  "fold_towel/episode_0001",
+  "fold_towel/episode_0005",
+  "fold_towel/episode_0008",
+  "fold_towel/episode_0009",
+  "fold_towel/episode_0011",
+  "fold_towel/episode_0012",
+  "fold_towel/episode_0015",
+  "fold_towel/episode_0016",
+  "fold_towel/episode_0037",
+  "fold_towel/episode_0043"
+ ],
+ "unroll_cylinder": [
+  "unroll_cylinder/episode_0000",
+  "unroll_cylinder/episode_0005",
+  "unroll_cylinder/episode_0008",
+  "unroll_cylinder/episode_0009",
+  "unroll_cylinder/episode_0011",
+  "unroll_cylinder/episode_0012",
+  "unroll_cylinder/episode_0015",
+  "unroll_cylinder/episode_0016",
+  "unroll_cylinder/episode_0037",
+  "unroll_cylinder/episode_0043"
+ ]
+}

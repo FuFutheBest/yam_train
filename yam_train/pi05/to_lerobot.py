@@ -3,6 +3,8 @@
     python -m yam_train.pi05.to_lerobot --data data/nedf3_30hz_v3 --repo-id yam/pi05_yam_all
     python -m yam_train.pi05.to_lerobot --data data/nedf3_30hz_v3 --repo-id yam/pi05_yam_split \
         --exclude configs/pi05/val_episodes.json
+    python -m yam_train.pi05.to_lerobot --data data/nedf3_30hz_r3 --repo-id yam/pi05_yam3_all \
+        --tasks put_blue_block_in_blue_cup fold_towel unroll_cylinder
 
 Per 30 Hz row of every episode:
     images.right_wrist / images.left_wrist   recorded JPEG -> RGB -> resize_with_pad 224x224 (openpi's
@@ -67,7 +69,7 @@ def main() -> None:
     p.add_argument("--data", required=True, type=Path, help="output dir of yam_train.data.convert")
     p.add_argument("--repo-id", required=True)
     p.add_argument("--exclude", type=Path, help="json {task: [episode names]} of demos to leave out")
-    p.add_argument("--tasks", nargs="+", default=list(PROMPTS))
+    p.add_argument("--tasks", nargs="+", default=["put_block_in_bowl", "put_blue_block_in_blue_cup"])
     p.add_argument("--max-episodes", type=int, default=0, help="per task, 0 = all (smoke tests)")
     p.add_argument("--writer-processes", type=int, default=8)
     p.add_argument("--info-only", action="store_true", help="only (re)write yam_info.json of an existing dataset")
