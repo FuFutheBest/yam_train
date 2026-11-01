@@ -1,4 +1,4 @@
-# put_blue_block_in_blue_cup: 50 eps; 1-6 blocks, exactly one blue block + one blue cup -> blue block into blue cup
+# put_blue_block_in_blue_cup: 100 eps (0000-0049 first set, 0050-0099 added later); 1-6 blocks, exactly one blue block + one blue cup -> blue block into blue cup
 # abs: target = leader joints (source behaviour)
 _base_: long.yaml
 data:

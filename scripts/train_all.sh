@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Start every act_ref training run in the background on a 4-GPU server (2 runs per GPU).
+# Start act_ref training runs in the background on a multi-GPU server.
 #
-#   bash scripts/train_all.sh [--set key=value ...]      # extra overrides go to every run
+#   bash scripts/train_all.sh [--set key=value ...]                  # extra overrides go to every run
+#   CONFIGS="blue_cup_abs fold_towel_delta" bash scripts/train_all.sh  # other configs (configs/<name>.yaml)
 #
-# 8 runs = {block_bowl, blue_cup} x {abs, delta} x {split, all}:
+# Default: the 8 runs {block_bowl, blue_cup} x {abs, delta} x {split, all}.
+# Each config gives 2 runs:
 #   runs/<cfg>      80/20 split (source): curves + eval_offline -> choose abs/delta and the epoch
 #   runs/<cfg>_all  data.train_ratio=1.0: every demo; the model to deploy (same epoch number)
-# One ACT run (batch 8) uses a small part of an H20, so the two runs of a config share its GPU.
+# One ACT run (batch 8) uses a small part of an H20, so several runs share a GPU: runs are dealt
+# round-robin over the GPUs, the (longer) _all runs first.
 # Logs: runs/<name>/train.log.   Watch: tail -f runs/*/train.log | grep -E 'eta|z=0'
 # Stop all: pkill -f 'yam_train.train --config'
 set -euo pipefail
@@ -20,7 +23,10 @@ PY="${PY:-.venv/bin/python}"
 NGPU="$("$PY" -c 'import torch; print(torch.cuda.device_count())')"
 [ "$NGPU" -ge 1 ] || { echo "no CUDA GPU visible" >&2; exit 1; }
 
-CONFIGS=(block_bowl_abs block_bowl_delta blue_cup_abs blue_cup_delta)
+read -r -a CONFIGS <<<"${CONFIGS:-block_bowl_abs block_bowl_delta blue_cup_abs blue_cup_delta}"
+for cfg in "${CONFIGS[@]}"; do
+  [ -f "configs/$cfg.yaml" ] || { echo "no configs/$cfg.yaml" >&2; exit 1; }
+done
 for name in "${CONFIGS[@]}" "${CONFIGS[@]/%/_all}"; do # refuse to mix with an old run
   if [ -s "runs/$name/metrics.jsonl" ]; then
     echo "runs/$name already exists; move or remove it first" >&2
@@ -28,11 +34,13 @@ for name in "${CONFIGS[@]}" "${CONFIGS[@]/%/_all}"; do # refuse to mix with an o
   fi
 done
 
-export OMP_NUM_THREADS=4 # 8 processes on one machine: avoid CPU oversubscription
+NRUN=$((2 * ${#CONFIGS[@]}))
+OMP=$(($(nproc) / NRUN / 2)) # e.g. 64 cores, 8 runs -> 4; leave room for the data loader workers
+export OMP_NUM_THREADS=$((OMP > 0 ? OMP : 1))
 i=0
-for cfg in "${CONFIGS[@]}"; do
-  gpu=$((i % NGPU))
-  for variant in split all; do
+for variant in all split; do
+  for cfg in "${CONFIGS[@]}"; do
+    gpu=$((i % NGPU))
     name="$cfg"
     extra=()
     if [ "$variant" = all ]; then
@@ -43,7 +51,7 @@ for cfg in "${CONFIGS[@]}"; do
     CUDA_VISIBLE_DEVICES="$gpu" nohup "$PY" -m yam_train.train --config "configs/$cfg.yaml" \
       --out "runs/$name" "${extra[@]}" "$@" >"runs/$name/train.log" 2>&1 &
     echo "GPU $gpu  pid $!  runs/$name"
+    i=$((i + 1))
   done
-  i=$((i + 1))
 done
 echo "started; first ETA appears after epoch 10: grep eta runs/*/train.log | tail"

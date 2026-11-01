@@ -1,0 +1,6 @@
+# fold_towel: 51 eps, 14-28 s; both arms fold a towel (bimanual: left arm moves ~1 rad, both grippers used)
+# abs: target = leader joints (source behaviour)
+_base_: long.yaml
+data:
+  task: fold_towel
+  action_mode: abs

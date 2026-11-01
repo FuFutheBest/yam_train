@@ -1,0 +1,6 @@
+# unroll_cylinder: 50 eps, 15-32 s; both arms hold the cylinder bottom, the right arm grips the cap and pulls it off (bimanual)
+# abs: target = leader joints (source behaviour)
+_base_: long.yaml
+data:
+  task: unroll_cylinder
+  action_mode: abs
