@@ -106,7 +106,16 @@ def load_model(model_dir: str | Path, **sample_kwargs):
 def cmd_serve(a) -> None:
     from openpi.serving import websocket_policy_server
 
+    import time
+
+    from yam_train.pi05.yam_policy import make_example
+
     policy, meta = load_model(a.model)
+    # the first inference compiles the network (~20 s on an H20): do it before the robot connects
+    for i in range(2):
+        t0 = time.perf_counter()
+        policy.infer(make_example())
+        log.info("warm-up inference %d: %.0f ms", i, (time.perf_counter() - t0) * 1000)
     log.info("serving %s (step %s) on port %d", a.model, meta.get("step"), a.port)
     websocket_policy_server.WebsocketPolicyServer(policy, host=a.host, port=a.port, metadata=meta).serve_forever()
 
