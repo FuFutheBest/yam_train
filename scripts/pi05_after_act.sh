@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unattended: wait for the LeRobot datasets -> norm stats -> wait until every act_ref training of this user
-# has ended -> pi0.5 training of CONFIG (split on GPUs 0,1, all on 2,3: all 4 GPUs busy).
+# of ACT_DIR (default ../yam_train_r3) has ended -> pi0.5 training of CONFIG (split on GPUs 0,1, all on 2,3: all 4 GPUs busy).
 #
 #   setsid nohup bash scripts/pi05_after_act.sh [CONFIG] [EXP] > logs/pi05_after_act.log 2>&1 &
 #
@@ -40,8 +40,17 @@ for c in (sys.argv[2] + "_split", sys.argv[2]):
         sys.exit(f"{c}: degenerate action range (dims {np.where(w[:14] < 0.005)[0].tolist()})")
 PY
 
-log "waiting for the act_ref trainings to end"
-while pgrep -u "$(id -u)" -f "yam_train.train --config" > /dev/null; do sleep 120; done
+ACT_DIR="$(realpath "${ACT_DIR:-../yam_train_r3}")"
+act_running() { # only our runs: started in ACT_DIR (other people run yam_train.train under this account too)
+  local p
+  for p in $(pgrep -u "$(id -u)" -f "yam_train.train --config" || true); do
+    [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$ACT_DIR" ] && return 0
+  done
+  return 1
+}
+act_running || { log "no act_ref training found in $ACT_DIR"; exit 1; }
+log "waiting for the act_ref trainings in $ACT_DIR to end"
+while act_running; do sleep 120; done
 log "act_ref done; GPUs:"
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader
 sleep 30
