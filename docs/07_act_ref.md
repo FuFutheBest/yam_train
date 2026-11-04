@@ -1,6 +1,6 @@
 # 07 act_ref：按 ACT 源码训练（当前主线）
 
-01–05 描述的是旧的 act_v2 方案（自己重写的 ACT）。从这里开始按 `tonyzhaozh/act` 源码训练。和源码只有两处不同：多了可选的动作表示 `delta`；`action_shift` 改为 0（见下文）。
+[act_v2/](act_v2/) 描述的是旧的 act_v2 方案（自己重写的 ACT）。从这里开始按 `tonyzhaozh/act` 源码训练。和源码只有两处不同：多了可选的动作表示 `delta`；`action_shift` 改为 0（见下文）。
 
 ## 流程
 
@@ -31,18 +31,13 @@ flowchart LR
 | 文件 | 内容 |
 |---|---|
 | `act_ref.yaml` | 源码的全部默认值（数据 / 网络 / 训练） |
-| `long.yaml` | 继承 `act_ref.yaml`，只把训练加长：20000 epoch、每 2000 存一次（理由见「训练时长与选模型」）。下面 4 个都继承它 |
-| `block_bowl_abs.yaml` / `blue_cup_abs.yaml` | 积木放碗 / 蓝块放蓝杯，动作 = 主臂关节（源码做法） |
-| `block_bowl_delta.yaml` / `blue_cup_delta.yaml` | 同上，动作 = 主臂关节 − chunk 起点的从臂关节 |
+| `long.yaml` | 继承 `act_ref.yaml`，只把训练加长：20000 epoch、每 2000 存一次（理由见「训练时长与选模型」）。下面的任务配置都继承它 |
+| `<任务>_abs.yaml` | 动作 = 主臂关节（源码做法） |
+| `<任务>_delta.yaml` | 动作 = 主臂关节 − chunk 起点的从臂关节 |
 
-## 数据（`../dataset`）
+任务前缀：`block_bowl`、`blue_cup`、`fold_towel`、`unroll_cylinder`（见下表），共 8 个任务配置。
 
-| 任务 | 配置前缀 | 条数 | 每条时长 | 训练 / 验证 | 内容 |
-|---|---|---|---|---|---|
-| `put_block_in_bowl` | `block_bowl_` | 49（episode_0024 失败已删） | 11–34 s，平均 16 s | 39 / 10 | 积木在左、碗在右，位置关系固定，把积木放进碗 |
-| `put_blue_block_in_blue_cup` | `blue_cup_` | 50 | 14–25 s，平均 18 s | 40 / 10 | 1–6 个不同颜色积木，只有一个蓝积木和一个蓝杯，把蓝积木放进蓝杯 |
-
-两个任务都只有右臂在做事：单条示范内左臂最多动 0.13 / 0.32 rad、左夹爪不动（0.8 / 1.4 rad 是所有示范合起来的范围，来自每条起始姿态不同），推理端默认冻结左臂。录制里的 `head` 相机是黑屏占位，不使用。转换后共 4.1 GB。
+### 关键超参数（`act_ref.yaml`）
 
 | 关键项 | 值 | 来源 |
 |---|---|---|
@@ -57,6 +52,27 @@ flowchart LR
 | `action_shift` | **0**（源码为 1） | 见下节 |
 
 单次运行时临时覆盖：`--set train.num_epochs=100 --set data.action_mode=delta`。
+
+## 数据（`../dataset`）
+
+| 任务 | 配置前缀 | 条数 | 每条时长 | 训练 / 验证 | 用臂 | 内容 |
+|---|---|---|---|---|---|---|
+| `put_block_in_bowl` | `block_bowl_` | 49（episode_0024 失败已删） | 11–34 s，平均 16 s | 39 / 10 | 右臂 | 积木在左、碗在右，位置关系固定，把积木放进碗 |
+| `put_blue_block_in_blue_cup` | `blue_cup_` | 100（0000–0049 第一批，0050–0099 后补） | 14–25 s（第一批） | 80 / 20 | 右臂 | 1–6 个不同颜色积木，只有一个蓝积木和一个蓝杯，把蓝积木放进蓝杯 |
+| `fold_towel` | `fold_towel_` | 51 | 14–28 s | 40 / 11 | **双臂** | 叠毛巾；左臂动约 1 rad，两个夹爪都用 |
+| `unroll_cylinder` | `unroll_cylinder_` | 50 | 15–32 s | 40 / 10 | **双臂** | 双手托住圆筒底部，右手夹住盖子拔下来 |
+
+- 积木放碗、蓝块放蓝杯只有右臂在做事：单条示范内左臂最多动 0.13 / 0.32 rad、左夹爪不动（0.8 / 1.4 rad 是所有示范合起来的范围，来自每条起始姿态不同），推理端冻结左臂。
+- 叠毛巾、拔盖子是双臂任务，推理端**不能**冻结左臂。
+- 录制里的 `head` 相机是黑屏占位，不使用。
+- 训练 / 验证按源码 `split_episodes(n, 0.8, seed 1)` 在每个任务排序后的示范上划分。
+
+### 训练轮次
+
+| 轮次 | 服务器目录 | 任务 | 说明 |
+|---|---|---|---|
+| 早期 | — | `block_bowl`、`blue_cup`（50 条） | 真机分析见 yam_infer；08 中对比用的 ACT 数字（`v1 delta`）来自这里 |
+| r3 | `~/output/fufu/yam_train_r3` | `blue_cup`（100 条）、`fold_towel`、`unroll_cylinder` | `CONFIGS=` 指定配置启动；pi0.5 的 `pi05_yam3` 用同一批验证示范（见 08） |
 
 ## action_shift：为什么改成 0
 
@@ -108,8 +124,10 @@ flowchart LR
 bash scripts/setup_venv.sh                                    # 服务器（cu126）；本机加 cpu
 python -m yam_train.data.convert --raw ../dataset --out data/nedf3_30hz --workers 16
 
-# 8 个训练一起后台启动（4 卡，每卡 2 个）：{block_bowl, blue_cup} × {abs, delta} × {80/20, 全部}
+# 默认 8 个训练一起后台启动（轮流分到各卡）：{block_bowl, blue_cup} × {abs, delta} × {80/20, 全部}
 bash scripts/train_all.sh
+# 其他任务：每个配置同样起 80/20 和 _all 两个训练
+CONFIGS="blue_cup_abs blue_cup_delta fold_towel_abs fold_towel_delta unroll_cylinder_abs unroll_cylinder_delta" bash scripts/train_all.sh
 grep eta runs/*/train.log | tail          # 速度与剩余时间；z=0 误差：grep z=0 runs/X/train.log
 
 # 选模型：同一任务的 abs / delta 各 ckpt 放一起比（只能用 80/20 的 run；_all 见过验证集，会被拒绝）

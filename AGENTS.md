@@ -22,11 +22,11 @@
 - 训练后网络可能还要调整，后续在同一会话继续迭代；保持代码、配置、日志可复现。
 - 不修改源项目 `SuperInference-feat-i2rt_NEDF3` 中的文件（只读引用其代码与数据）。
 
-## pi05 分支（pi0.5 / openpi）
+## pi0.5（openpi，已合入 main）
 
 - 代码在 `yam_train/pi05/`，在 openpi 自己的 uv 环境里运行：`source scripts/pi05_env.sh` 后用 `$PI05_PY`。openpi 固定在 `215abfb`，由 `scripts/setup_openpi.sh` 安装到 `../openpi`。
 - 服务器目录：`~/output/fufu/yam_train_pi05`（不是 git 仓库，代码用 tar 同步）。服务器上的 openpi 在 `../openpi`，pi05_base 缓存在 `../.cache/openpi`。
-- 数据：`data/nedf3_30hz_v3`（新增 `blue_block_v2`），LeRobot 数据集放在 `lerobot/`，checkpoint 放在 `runs_pi05/`。
+- 数据：`pi05_yam` 用 `data/nedf3_30hz_v3`（新增 `blue_block_v2`）；`pi05_yam3`（蓝杯 + 叠毛巾 + 拔盖子，两臂 delta）用 `data/nedf3_30hz_r3`。LeRobot 数据集放在 `lerobot/`，checkpoint 放在 `runs_pi05/`。
 - 说明见 `docs/08_pi05.md`；推理侧见 yam_infer 的 `pi05` 分支（`format: pi05`，websocket 连接策略服务）。
 - 本地做静态检查时需要 openpi 源码：`tmp/openpi`（已写入 pyrightconfig 的 extraPaths）。
 
@@ -34,23 +34,25 @@
 
 ```text
 yam_train/
-├── configs/           act_ref.yaml（源码全部默认值）→ long.yaml（20000 epoch）→ {block_bowl,blue_cup}_{abs,delta}.yaml（_base_ 继承）
+├── configs/           act_ref.yaml（源码全部默认值）→ long.yaml（20000 epoch）→ {block_bowl,blue_cup,fold_towel,unroll_cylinder}_{abs,delta}.yaml（_base_ 继承）；pi05/ 验证集名单
 ├── yam_train/
 │   ├── detr/          从 tonyzhaozh/act 原样拷贝的网络（不要改；改动记 docs/VENDORED.md）
 │   ├── policy.py      源码 ACTPolicy + 优化器
 │   ├── config.py      YAML 读取（_base_ 继承、--set a.b=c 覆盖）
 │   ├── data/          nedf3.py 读录制 / convert.py 转数据（原始 JPEG）/ dataset.py = 源码 utils.py
 │   ├── train.py       = 源码 train_bc，单卡，一个任务一个模型
-│   └── tools/         eval_offline.py（多个 ckpt 一起做时间集成开环评估 → 选模型）、export.py
+│   ├── tools/         eval_offline.py（多个 ckpt 一起做时间集成开环评估 → 选模型）、export.py
+│   └── pi05/          pi0.5：to_lerobot / config / yam_policy / cli（norm-stats、train、export、serve）/ eval_offline
 ├── scripts/setup_venv.sh  建 .venv（默认 torch 2.7.1+cu126，阿里云镜像；`cpu` 参数给无 GPU 机器）
-├── scripts/train_all.sh   4 卡后台启动 8 个训练：任务 × abs/delta × 80/20 划分 / 全部数据（_all，交付用）
-└── docs/              07 当前主线 act_ref；06 旧方案与 ACT 对比；01–05 旧方案 act_v2；VENDORED.md
+├── scripts/train_all.sh   后台启动 ACT 训练（默认 8 个；CONFIGS= 指定其他配置）：配置 × 80/20 划分 / 全部数据（_all，交付用）
+├── scripts/{setup_openpi,pi05_env,train_pi05,pi05_after_act}.sh  pi0.5 环境 / 训练 / 等 ACT 结束后无人值守启动
+└── docs/              README.md 索引；07 ACT 主线 act_ref；08 pi0.5；act_v2/ 旧方案（01–06）；VENDORED.md
 ```
 
 - 主线原则：**一切按 ACT 源码**。偏离只有两处：新增 `data.action_mode: delta`；`data.action_shift` 用 0（源码 1，理由见 docs/07）。新的改动必须做成配置项，默认值保持源码行为。
 - 不放推理代码（在 `../yam_infer`）；推理端需要的改动列在 docs/07_act_ref.md 末尾。
 - 本机 `.venv` 由 `bash scripts/setup_venv.sh cpu` 建立（torch CPU，只做静态检查/小测试）。`../opus_inference_train` 已弃用。
-- 训练数据：`../dataset/{put_block_in_bowl,put_blue_block_in_blue_cup}`（任务说明见各自 README.md）；`data/nedf3_30hz` 是 `convert --raw ../dataset` 的结果（不进 git）。
+- 训练数据：`../dataset/{put_block_in_bowl,put_blue_block_in_blue_cup,fold_towel,unroll_cylinder}`（任务说明见各自 README.md；后两个是双臂任务）；`data/nedf3_30hz` 是 `convert --raw ../dataset` 的结果（不进 git）。
 
 ## 已交付模型的来源（`../yam_infer/models/`，旧方案 act_v2，代码见 git 提交 b258d75）
 
