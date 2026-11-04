@@ -1,5 +1,5 @@
 # Environment for the pi0.5 (openpi) tools:   source scripts/pi05_env.sh
-# Then: "$PI05_PY" -m yam_train.pi05.cli ...   (see docs/08_pi05.md)
+# Then: "$PI05_PY" -m yam_train.pi05.cli ...   (see docs/02_repo.md)
 #
 # Layout (defaults; override any variable before sourcing):
 #   $YAM_TRAIN_DIR            this repo (pi05 branch)

@@ -8,5 +8,5 @@ Runs inside the openpi virtualenv (see scripts/setup_openpi.sh), not in yam_trai
     cli.py          train / norm-stats / serve / eval entry points (thin wrappers around openpi's scripts)
     eval_offline.py open-loop evaluation on held-out demos (same metrics as the act_ref grasp test)
 
-See docs/08_pi05.md.
+See docs/02_repo.md.
 """

@@ -10,7 +10,7 @@
 #   20000 epochs = 100k updates (39 train eps)
 #                / 140k (all 49-50 eps, data.train_ratio=1.0)
 # Pick the checkpoint with eval_offline (several at once) + robot
-# trials, NOT best.pt (min of a 10-sample val loss, docs/07).
+# trials, NOT best.pt (min of a 10-sample val loss, docs/01_background.md).
 _base_: act_ref.yaml
 train:
   num_epochs: 20000
